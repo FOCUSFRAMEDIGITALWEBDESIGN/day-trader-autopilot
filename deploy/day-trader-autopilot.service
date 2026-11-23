@@ -1,0 +1,16 @@
+# systemd (Linux server / Raspberry Pi). Adjust the paths, then:
+#   sudo cp deploy/day-trader-autopilot.service /etc/systemd/system/
+#   sudo systemctl enable --now day-trader-autopilot
+[Unit]
+Description=Day Trader Autopilot (Alpaca paper)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/day-trader-autopilot
+EnvironmentFile=/opt/day-trader-autopilot/.env
+ExecStart=/usr/bin/python3 autopilot/autopilot.py run
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

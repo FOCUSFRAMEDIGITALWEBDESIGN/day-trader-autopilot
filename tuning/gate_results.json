@@ -1,0 +1,284 @@
+{
+ "A pack default: OR15 mid 1R": {
+  "n": 848,
+  "avg_R": -0.10442784654014275,
+  "best": [
+   {
+    "avg_R": -0.0705,
+    "n": 157,
+    "gate": {
+     "edge": 5,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.0705,
+    "n": 157,
+    "gate": {
+     "edge": 5,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": -0.0898,
+    "n": 367,
+    "gate": {
+     "edge": null,
+     "hist": 0.0,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.1044,
+    "n": 848,
+    "gate": {
+     "edge": null,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.1048,
+    "n": 366,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.1113,
+    "n": 442,
+    "gate": {
+     "edge": null,
+     "hist": -0.05,
+     "avgR": null
+    }
+   }
+  ]
+ },
+ "B OR15 mid 1.5R <=11:25 over<=.75": {
+  "n": 762,
+  "avg_R": -0.08900699286494815,
+  "best": [
+   {
+    "avg_R": -0.0729,
+    "n": 216,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.0729,
+    "n": 216,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": -0.0771,
+    "n": 147,
+    "gate": {
+     "edge": 2,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.0771,
+    "n": 147,
+    "gate": {
+     "edge": 2,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": -0.089,
+    "n": 762,
+    "gate": {
+     "edge": null,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.0906,
+    "n": 365,
+    "gate": {
+     "edge": null,
+     "hist": -0.05,
+     "avgR": null
+    }
+   }
+  ]
+ },
+ "C OR15 mid 2R <=11:25 over<=.75": {
+  "n": 762,
+  "avg_R": -0.11449061997975787,
+  "best": [
+   {
+    "avg_R": 0.0076,
+    "n": 117,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": 0.0076,
+    "n": 117,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": -0.1072,
+    "n": 328,
+    "gate": {
+     "edge": null,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": -0.1145,
+    "n": 762,
+    "gate": {
+     "edge": null,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.1201,
+    "n": 352,
+    "gate": {
+     "edge": null,
+     "hist": -0.05,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": -0.133,
+    "n": 291,
+    "gate": {
+     "edge": null,
+     "hist": 0.0,
+     "avgR": null
+    }
+   }
+  ]
+ },
+ "D OR30 mid 2R <=12:25 volx>=1": {
+  "n": 66,
+  "avg_R": 0.15506458908053145,
+  "best": [
+   {
+    "avg_R": 0.5863,
+    "n": 27,
+    "gate": {
+     "edge": null,
+     "hist": 0.0,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": 0.4443,
+    "n": 31,
+    "gate": {
+     "edge": null,
+     "hist": -0.05,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": 0.2868,
+    "n": 30,
+    "gate": {
+     "edge": null,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": 0.1551,
+    "n": 66,
+    "gate": {
+     "edge": null,
+     "hist": null,
+     "avgR": null
+    }
+   }
+  ]
+ },
+ "E OR15 mid 2R <=11:25 over<=.75 gap": {
+  "n": 371,
+  "avg_R": -0.030762480530485626,
+  "best": [
+   {
+    "avg_R": 0.2821,
+    "n": 49,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": 0.2821,
+    "n": 49,
+    "gate": {
+     "edge": 0,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": 0.148,
+    "n": 33,
+    "gate": {
+     "edge": 2,
+     "hist": null,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": 0.148,
+    "n": 33,
+    "gate": {
+     "edge": 2,
+     "hist": null,
+     "avgR": 0.0
+    }
+   },
+   {
+    "avg_R": 0.0051,
+    "n": 34,
+    "gate": {
+     "edge": 0,
+     "hist": -0.05,
+     "avgR": null
+    }
+   },
+   {
+    "avg_R": 0.0051,
+    "n": 34,
+    "gate": {
+     "edge": 0,
+     "hist": -0.05,
+     "avgR": 0.0
+    }
+   }
+  ]
+ }
+}

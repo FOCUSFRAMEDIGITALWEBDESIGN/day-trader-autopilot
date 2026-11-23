@@ -1,0 +1,64 @@
+fail AAPL query2 HTTP Error 429: Too Many Requests
+fail AAPL query1 HTTP Error 429: Too Many Requests
+ok MSFT
+ok NVDA
+ok AMZN
+ok META
+fail GOOGL query2 HTTP Error 429: Too Many Requests
+ok GOOGL
+ok TSLA
+ok AMD
+ok AVGO
+ok NFLX
+ok PLTR
+fail COIN query2 HTTP Error 429: Too Many Requests
+fail COIN query1 HTTP Error 429: Too Many Requests
+ok MU
+fail INTC query2 HTTP Error 429: Too Many Requests
+ok INTC
+ok SMCI
+ok MSTR
+ok UBER
+ok SHOP
+fail CRWD query2 HTTP Error 429: Too Many Requests
+fail CRWD query1 HTTP Error 429: Too Many Requests
+ok PANW
+ok ORCL
+ok CRM
+fail ADBE query2 HTTP Error 429: Too Many Requests
+ok ADBE
+ok QCOM
+fail ARM query2 HTTP Error 429: Too Many Requests
+ok ARM
+fail SNOW query2 HTTP Error 429: Too Many Requests
+ok SNOW
+ok DELL
+ok HOOD
+ok SOFI
+ok RIVN
+fail BA query2 HTTP Error 429: Too Many Requests
+ok BA
+ok JPM
+ok BAC
+ok GS
+ok XOM
+ok CVX
+ok LLY
+ok UNH
+fail WMT query2 HTTP Error 429: Too Many Requests
+fail WMT query1 HTTP Error 429: Too Many Requests
+ok COST
+fail HD query2 HTTP Error 429: Too Many Requests
+ok HD
+ok DIS
+ok NKE
+ok PYPL
+ok ABNB
+fail DKNG query2 HTTP Error 429: Too Many Requests
+ok DKNG
+ok MRVL
+ok ON
+ok LRCX
+ok AMAT
+fail TXN query2 HTTP Error 429: Too Many Requests
+ok TXN

@@ -1,0 +1,5 @@
+.env
+trader/
+tuning/data/
+__pycache__/
+*.pyc
