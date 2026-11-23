@@ -24,6 +24,16 @@ trader-risk muss jede exakte Order mit PASS freigeben, die Time Machine muss ein
 - Keys nur in `.env` / Umgebungsvariablen, nie im Chat, nie im Log.
 - Jede automatische Freigabe steht in `trader/state/broker.json` mit `"approved_by": "autopilot"`.
 
+## Einrichten unter Windows
+
+1. Python installieren: <https://www.python.org/downloads/>, Haken bei **„Add python.exe to PATH“**.
+2. Doppelklick auf **`start.bat`**: Beim ersten Mal wird `.env` angelegt und in Notepad geöffnet.
+   Paper-Key und Secret eintragen, speichern, Notepad schließen.
+3. Noch einmal **`start.bat`**: Autopilot und Dashboard starten, der Browser öffnet <http://127.0.0.1:8765>.
+4. Beenden mit **`stop.bat`**.
+
+Der PC darf zwischen 15:30 und 22:00 Uhr (US-Handelszeit) nicht in den Energiesparmodus gehen.
+
 ## Einrichten (Mac, Linux, Raspberry Pi oder kleiner Server)
 
 Python 3.9+; nichts zu installieren (nur Standardbibliothek).
