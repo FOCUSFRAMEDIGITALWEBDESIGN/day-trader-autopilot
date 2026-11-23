@@ -63,7 +63,35 @@ def passes(f, p):
     return True, ""
 
 
-def simulate_exit(bars, fill, stop, target, risk, mode, at_R=1.0):
+TRAILING = ("trail_r", "trail_atr")
+
+
+def atr(bars, n=14):
+    """Average true range of the last n bars (fewer if the session is younger)."""
+    trs, pc = [], None
+    for b in bars:
+        trs.append(b["h"] - b["l"] if pc is None else max(b["h"] - b["l"], abs(b["h"] - pc), abs(b["l"] - pc)))
+        pc = b["c"]
+    trs = trs[-n:]
+    return sum(trs) / len(trs) if trs else None
+
+
+def trail_level(mode, fill, stop, risk, high, atr_value=None, k=2.0):
+    """Where a trailing stop sits once the highest high since the fill is `high`.
+    trail_r:   +1R -> stop at the fill, +2R -> fill + 1R, +3R -> fill + 2R, ...
+    trail_atr: the highest high minus k x ATR
+    Never below `stop`, rounded down to the cent."""
+    st = stop
+    if mode == "trail_r" and risk > 0:
+        n = int((high - fill) / risk + 1e-9)
+        if n >= 1:
+            st = max(st, fill + (n - 1) * risk)
+    elif mode == "trail_atr" and atr_value:
+        st = max(st, high - k * atr_value)
+    return int(st * 100 + 1e-6) / 100.0
+
+
+def simulate_exit(bars, fill, stop, target, risk, mode, at_R=1.0, atr_value=None, k=2.0):
     """Walk the bars after the fill. Returns R (per full position).
 
     fixed:     stop / target / last close
@@ -71,6 +99,8 @@ def simulate_exit(bars, fill, stop, target, risk, mode, at_R=1.0):
                (from the NEXT bar on; inside one bar the stop is checked first)
     partial:   at fill + at_R x risk half is sold there and the stop moves to the fill;
                the other half runs to the target, the new stop or the last close
+    trail_r / trail_atr: no fixed target; the stop follows the highest high (trail_level)
+               after every bar and the trade ends at that stop or at the last close
     """
     if not bars:
         return 0.0
@@ -78,6 +108,14 @@ def simulate_exit(bars, fill, stop, target, risk, mode, at_R=1.0):
     st = stop
     half = None          # R banked on the first half (partial)
     moved = False
+    if mode in TRAILING:   # no fixed target: out at the trailing stop or the last close
+        high = fill
+        for b in bars:
+            if b["l"] <= st:
+                return (st - fill) / risk
+            high = max(high, b["h"])
+            st = trail_level(mode, fill, st, risk, high, atr_value, k)   # counts from the next bar
+        return (bars[-1]["c"] - fill) / risk
     for b in bars:
         if b["l"] <= st:
             r = (st - fill) / risk

@@ -92,6 +92,8 @@ DEFAULTS = {
     "rs_min": None,
     "exit_mode": "fixed",
     "exit_at_R": 1.0,
+    "exit_atr_k": 2.0,
+    "trail_cap_R": 10,
     "learn_years": 2,
     "learn_weekly": True,
     "strategy_version": 1,
@@ -687,6 +689,9 @@ class Pilot:
                  "features": c.get("features"),
                  "fill_price": float(fp) if fp else None,
                  "fill_recorded": bool(fq and float(fq) > 0), "legs": legs, "exit_price": None, "pnl": None}
+        trade["entry_bar"] = int(((c["stages"].get("entry") or {}).get("trigger") or {}).get("bar_index", 0))
+        if trade["exit_mode"] in fx.TRAILING:
+            self.start_trailing(trade)
         self.state["trades"].append(trade)
         c["result"] = "ORDER PLACED"
         self.ok(c, "broker", "bracket buy %s %s sent to Alpaca paper (id %s…), filled %s @ %s" % (
@@ -715,6 +720,8 @@ class Pilot:
             if fq > 0 and not t.get("fill_recorded"):
                 self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "buy", "--qty", fq, "--price", fp)
                 t.update(fill_recorded=True, fill_price=float(fp), status="open", qty=fq)
+                if t.get("exit_mode") in fx.TRAILING and not t.get("target_cap"):
+                    self.start_trailing(t)
             legs = o.get("legs") or []
             if t.get("oco_id"):  # after a partial exit the rest is protected by an OCO pair
                 oco = self.broker.order(t["oco_id"]) or {}
@@ -724,14 +731,76 @@ class Pilot:
                     q, p = float(leg["filled_qty"]), float(leg["filled_avg_price"])
                     self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "sell", "--qty", q, "--price", p)
                     t["legs_recorded"].append(leg["id"])
-                    self.close_trade(t, p, "target" if leg.get("type") == "limit" else "stop", qty=q)
+                    how = "target" if leg.get("type") == "limit" else \
+                        ("trail" if t.get("exit_mode") in fx.TRAILING and p > (t.get("fill_price") or p) else "stop")
+                    self.close_trade(t, p, how, qty=q)
                     break
             if t.get("status") == "open" and t.get("fill_recorded"):
                 self.manage_exit(t, legs)
 
+    def start_trailing(self, t):
+        """Trailing exits have no fixed target: the bracket's take-profit is moved far away
+        (trail_cap_R x risk) and the ATR is measured on today's bars up to the entry bar."""
+        plan = t.get("plan") or {}
+        t["exit_atr_k"] = float(self.ap.get("exit_atr_k", 2.0))
+        try:
+            D, _ = self._sessions(t["symbol"], "1d")
+            t["atr"] = round(fx.atr([D[i] for i in sorted(D) if i <= t["entry_bar"]]) or 0, 4) or None
+        except Exception as e:
+            t["atr"] = None
+            self.event("warn", "%s: no ATR (%s)" % (t["symbol"], str(e)[:80]))
+        if not t.get("fill_price") or not plan.get("risk_per_share"):
+            return
+        cap = round(t["fill_price"] + float(self.ap.get("trail_cap_R", 10)) * plan["risk_per_share"], 2)
+        tp = t.get("legs", {}).get("limit")
+        try:
+            if tp:
+                self.broker.replace(tp, limit_price="%.2f" % cap)
+                t["target_cap"] = cap
+        except AlpacaError as e:
+            self.event("error", "%s: could not lift the take-profit for trailing: %s" % (t["symbol"], e))
+
+    def trail(self, t, legs):
+        """Once per completed 5-minute bar: move the stop up to fx.trail_level, never down."""
+        bar_key = self.ny().strftime("%H") + str((self.ny().minute // 5) * 5)
+        if t.get("trail_bar") == bar_key:
+            return
+        t["trail_bar"] = bar_key
+        plan = t.get("plan") or {}
+        try:
+            D, _ = self._sessions(t["symbol"], "1d")
+        except Exception as e:
+            self.last_error = "trailing %s: %s" % (t["symbol"], str(e)[:80])
+            return
+        after = [D[i] for i in sorted(D) if i > t.get("entry_bar", 0)]
+        if not after:
+            return
+        high = max([t["fill_price"]] + [b["h"] for b in after])
+        cur = t.get("stop_now") or plan["stop"]
+        new = fx.trail_level(t["exit_mode"], t["fill_price"], cur, plan["risk_per_share"], high,
+                             t.get("atr"), float(t.get("exit_atr_k", 2.0)))
+        last = after[-1]["c"]
+        if new <= cur + 0.004 or new >= last:
+            return   # nothing to do, or the stop would sit at/above the market (it would fill at once)
+        stop_leg = next((l for l in legs if l.get("type") == "stop" and l.get("status") in ("new", "held", "accepted")), None)
+        if not stop_leg:
+            return
+        try:
+            self.broker.replace(stop_leg["id"], stop_price="%.2f" % new)
+        except AlpacaError as e:
+            self.event("error", "%s: could not trail the stop to %.2f: %s" % (t["symbol"], new, e))
+            return
+        t["stop_now"] = new
+        t.setdefault("trail_log", []).append([self.ny().strftime("%H:%M"), new])
+        self.event("trade", "%s: trailing stop %.2f -> %.2f (high %.2f, %+.2fR locked)" % (
+            t["symbol"], cur, new, high, (new - t["fill_price"]) / plan["risk_per_share"]))
+
     def manage_exit(self, t, legs):
-        """Breakeven / partial exit once the price is exit_at_R x risk above the fill."""
+        """Breakeven / partial exit once the price is exit_at_R x risk above the fill;
+        trailing stops once per bar."""
         mode = t.get("exit_mode") or "fixed"
+        if mode in fx.TRAILING:
+            return self.trail(t, legs)
         if mode == "fixed" or t.get("exit_adjusted"):
             return
         plan = t.get("plan") or {}
@@ -792,7 +861,7 @@ class Pilot:
         t["R"] = round(t["pnl"] / (risk * t["qty"]), 2) if risk and t["qty"] else None
         self.state["realized"] = round(self.state.get("realized", 0) + t["pnl"], 2)
         self.event("trade", "%s %s closed at %.2f (%s): P&L $%+.2f" % (
-            "TARGET" if how == "target" else "STOP" if how == "stop" else "FLAT", t["symbol"], price, how, t["pnl"]))
+            {"target": "TARGET", "stop": "STOP", "trail": "TRAILING STOP"}.get(how, "FLAT"), t["symbol"], price, how, t["pnl"]))
 
     # ------------------------------------------------------------ out by the close
     def flatten_all(self):

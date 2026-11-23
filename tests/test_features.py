@@ -45,3 +45,28 @@ class Filters(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Trailing(unittest.TestCase):
+    # fill 100, stop 98, risk 2
+    def test_r_steps(self):
+        self.assertEqual(fx.trail_level("trail_r", 100, 98, 2, 101.9), 98.0)
+        self.assertEqual(fx.trail_level("trail_r", 100, 98, 2, 102.0), 100.0)   # +1R: stop to the fill
+        self.assertEqual(fx.trail_level("trail_r", 100, 98, 2, 104.5), 102.0)   # +2R: stop at +1R
+        self.assertEqual(fx.trail_level("trail_r", 100, 102, 2, 102.5), 102.0)  # never down
+
+    def test_atr(self):
+        self.assertEqual(fx.trail_level("trail_atr", 100, 98, 2, 103, atr_value=1.0, k=2), 101.0)
+        self.assertEqual(fx.trail_level("trail_atr", 100, 98, 2, 99.5, atr_value=1.0, k=2), 98.0)
+        self.assertAlmostEqual(fx.atr([bar(10, 11, 9, 10), bar(10, 12, 10, 11)]), 2.0)
+
+    def test_simulated_trades(self):
+        up = [bar(100, 102.5, 99.5, 102), bar(102, 104.5, 101.5, 104), bar(104, 106.2, 103.5, 106), bar(106, 106, 103.9, 104)]
+        # R steps: after 106.2 (+3.1R) the stop is 104 (+2R); the last bar's low 103.9 hits it
+        self.assertEqual(fx.simulate_exit(up, 100, 98, 999, 2, "trail_r"), 2.0)
+        # a fixed 2R target would have stopped at 104 too, but the trend could run further:
+        run = up[:3] + [bar(106, 110, 105.5, 109.5)]
+        self.assertEqual(fx.simulate_exit(run, 100, 98, 999, 2, "trail_r"), 4.75)       # out at the close 109.5
+        self.assertEqual(fx.simulate_exit(run, 100, 98, 104, 2, "fixed"), 2.0)
+        # ATR 1, k 2: stop trails 2 under the high; bar 4's low 103.9 < 106.2-2=104.2 -> out at 104.2
+        self.assertAlmostEqual(fx.simulate_exit(up, 100, 98, 999, 2, "trail_atr", atr_value=1.0, k=2), 2.1)

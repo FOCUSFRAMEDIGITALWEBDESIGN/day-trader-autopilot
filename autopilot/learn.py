@@ -43,7 +43,7 @@ REPLAYS = 600
 
 # the only keys the learner may change (how setups are chosen and exited, never how much is risked)
 KEYS = ["or_minutes", "last_entry", "max_pct_over", "gap_filter", "rvol_min", "market_filter", "rs_min",
-        "stop", "target", "exit_mode", "min_volume_x"]
+        "stop", "target", "exit_mode", "exit_atr_k", "min_volume_x"]
 GRID = {k: None for k in KEYS}
 EDGES = [0.0, 2.0, 5.0]   # tm_min_edge_pts candidates (stage 2)
 

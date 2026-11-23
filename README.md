@@ -100,6 +100,11 @@ Abschalten: `"learn_weekly": false` in `trader/autopilot.json`.
 | `rs_min` | Aktie muss seit Eröffnung **stärker als SPY** sein (0 = mindestens gleich stark) |
 | `exit_mode: "breakeven"` | ab +1R wird der **Stop auf den Einstieg** gezogen |
 | `exit_mode: "partial"` | ab +1R wird die **Hälfte verkauft**, der Rest läuft mit Stop auf Einstieg zum Ziel |
+| `exit_mode: "trail_r"` | **Trailing-Stop in R-Stufen**, kein festes Ziel: +1R → Stop auf Einstieg, +2R → Stop auf +1R, … |
+| `exit_mode: "trail_atr"` | **Trailing-Stop im ATR-Abstand**, kein festes Ziel: Stop = Hoch seit Einstieg − `exit_atr_k` × ATR |
+
+Beim Trailing wird der Stop nach jeder 5-Minuten-Kerze bei Alpaca nachgezogen, nie nach unten. Das
+Take-Profit der Bracket-Order wird auf `trail_cap_R` (10R) als Notbremse hochgesetzt; spätestens 15:55 wird verkauft.
 
 Preise für Größe und Ausstiege kommen in Echtzeit von Alpaca (Yahoo nur als Ersatz).
 Das Lernmodul lädt mit deinen Paper-Keys **2 Jahre 5-Minuten-Kerzen von Alpaca** (`learn_years`) und testet

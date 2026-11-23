@@ -24,7 +24,7 @@ tm = bt.tm
 FLAT = bt.FLAT_SLOT
 STOPS = ["or-mid", "or-low"]
 TARGETS = ["1.5R", "2R", "3R"]
-EXITS = ["fixed", "breakeven", "partial"]
+EXITS = ["fixed", "breakeven", "partial", "trail_r", "trail_atr:1.5", "trail_atr:3"]
 ROWSETS = {"or_minutes": [15, 30], "last_entry": ["10:30", "11:30", "12:30"]}
 FILTERS = {"max_pct_over": [0.75, 0], "gap_filter": [True, False], "rvol_min": [0, 1.5, 2.5],
            "market_filter": ["none", "green"], "rs_min": [None, 0.0]}
@@ -87,6 +87,7 @@ def build_rows(data, or_minutes, last_entry):
                    "rvol": fx.rvol(D, past, n), "market_ok": fx.market_ok(sp, k, "green"),
                    "rs": fx.rel_strength(D, sp, k), "R": {}, "plan": {}}
             after = D[k + 1:FLAT + 1]
+            a14 = fx.atr(D[:k + 1])
             for st in STOPS:
                 stop = tm.cents_away((oh + ol) / 2 if st == "or-mid" else ol, True)
                 risk = sig - stop
@@ -98,7 +99,14 @@ def build_rows(data, or_minutes, last_entry):
                         continue
                     row["plan"][(st, tg)] = (stop, target)
                     for ex in EXITS:
-                        row["R"][(st, tg, ex)] = fx.simulate_exit(after, fill, stop, target, risk, ex)
+                        mode, _, kk = ex.partition(":")
+                        done = [row["R"][(st, t0, ex)] for t0 in TARGETS if (st, t0, ex) in row["R"]]
+                        if mode in fx.TRAILING and done:
+                            # trailing exits have no target: the same result for every target
+                            row["R"][(st, tg, ex)] = done[0]
+                            continue
+                        row["R"][(st, tg, ex)] = fx.simulate_exit(after, fill, stop, target, risk, mode,
+                                                                  atr_value=a14, k=float(kk or 2))
             if row["R"]:
                 rows.append(row)
     return rows
@@ -125,7 +133,10 @@ def summary(rs):
 def settings(rs_key, f, out_key):
     s = dict(rs_key)
     s.update(f)
-    s.update({"stop": out_key[0], "target": out_key[1], "exit_mode": out_key[2], "min_volume_x": None})
+    mode, _, kk = out_key[2].partition(":")
+    s.update({"stop": out_key[0], "target": out_key[1], "exit_mode": mode, "min_volume_x": None})
+    if kk:
+        s["exit_atr_k"] = float(kk)
     return s
 
 
@@ -163,7 +174,8 @@ _mc_cache = {}
 
 def gated(data, rows, s, recent_from, edges=(0.0, 2.0, 5.0), replays=600):
     """Stage 2: the Time Machine gate, walk-forward (only sessions before each day)."""
-    out_key = (s["stop"], s["target"], s["exit_mode"])
+    ex = s["exit_mode"] + (":%g" % float(s.get("exit_atr_k", 2)) if s["exit_mode"] == "trail_atr" else "")
+    out_key = (s["stop"], s["target"], ex)
     tr = float(s["target"][:-1])
     res = {e: [] for e in edges}
     S_by = data
@@ -190,9 +202,17 @@ def gated(data, rows, s, recent_from, edges=(0.0, 2.0, 5.0), replays=600):
     return res
 
 
+def exit_label(s):
+    m = s.get("exit_mode", "fixed")
+    return {"fixed": "fest", "breakeven": "Stop auf Einstieg ab 1R", "partial": "halb bei 1R",
+            "trail_r": "Trailing in R-Stufen, ohne Ziel",
+            "trail_atr": "Trailing %g× ATR, ohne Ziel" % float(s.get("exit_atr_k", 2))}.get(m, m)
+
+
 def describe(s, edge=None):
-    bits = ["OR%s" % s["or_minutes"], s["stop"], s["target"], "bis " + s["last_entry"],
-            "Ausstieg " + {"fixed": "fest", "breakeven": "Stop auf Einstieg ab 1R", "partial": "halb bei 1R"}[s.get("exit_mode", "fixed")]]
+    bits = ["OR%s" % s["or_minutes"], s["stop"], "TM-Ziel " + s["target"] if s.get("exit_mode") in fx.TRAILING
+            else s["target"], "bis " + s["last_entry"],
+            "Ausstieg " + exit_label(s)]
     if s.get("max_pct_over"):
         bits.append("≤%s%% über Range" % s["max_pct_over"])
     if s.get("gap_filter"):

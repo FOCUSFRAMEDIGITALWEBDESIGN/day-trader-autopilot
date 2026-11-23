@@ -16,6 +16,10 @@ SIM = {"scan": "tests/fixtures/trader-scanner/wall5m-2026-10-19.json.gz",
        "spy": "tests/fixtures/autopilot/SPY-60d5m.json.gz"}
 
 
+ATR_AT_ENTRY = 3.2182     # 14-bar ATR of TSLA's 9:30-10:10 bars on 2026-10-19 (9 bars)
+TRAIL_AT_1045 = 361.95    # 366.78 high - 1.5 x ATR, rounded down to the cent
+
+
 def post(path, body):
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (PORT, path), data=json.dumps(body).encode(),
                                  method="POST", headers={"Content-Type": "application/json"})
@@ -156,6 +160,27 @@ class AutopilotReel(unittest.TestCase):
         self.assertIsNotNone(f["rvol"])
         self.assertIsNotNone(f["rs"])
         self.assertEqual(st["day"]["trades"], [])
+
+    def test_trailing_atr_stop_follows_the_trend(self):
+        self.autopilot({"target": "2R", "exit_mode": "trail_atr", "exit_atr_k": 1.5, "tm_hist_min_avg_R": None,
+                        "tm_min_edge_pts": -99, "tm_min_avg_R": -9, "tm_replays": 2000})
+        st, out = self.tick("2026-10-19 10:15")
+        t = st["day"]["trades"][0]
+        tp = next(o for o in mock_broker.S["orders"].values() if o.get("parent") and o["type"] == "limit")
+        self.assertEqual(tp["limit_price"], "%.2f" % (364.30 + 10 * 5.86))   # no fixed target: far cap
+        self.assertAlmostEqual(t["atr"], ATR_AT_ENTRY, places=3)
+        post("/mock/price", {"TSLA": 366.11})
+        st, out = self.tick("2026-10-19 10:45")          # TSLA's real bars ran to 366.78 by then
+        t = st["day"]["trades"][0]
+        stop_leg = next(o for o in mock_broker.S["orders"].values() if o.get("type") == "stop")
+        self.assertEqual(t["stop_now"], TRAIL_AT_1045)
+        self.assertEqual(stop_leg["stop_price"], "%.2f" % TRAIL_AT_1045)
+        self.assertIn("trailing stop", out)
+        post("/mock/fill_leg", {"symbol": "TSLA", "type": "stop"})
+        st, out = self.tick("2026-10-19 11:00")
+        t = st["day"]["trades"][0]
+        self.assertEqual(t["status"], "stop")       # 361.95 is under the fill 364.30: a loss, smaller than planned
+        self.assertEqual(t["pnl"], round((TRAIL_AT_1045 - 364.30) * 8, 2))
 
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")
