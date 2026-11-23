@@ -20,7 +20,7 @@ def yahoo_to_alpaca_bars(path):
     for i, t in enumerate(r["timestamp"]):
         if q["close"][i] is None:
             continue
-        out.append({"t": datetime.datetime.utcfromtimestamp(t).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        out.append({"t": datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "o": q["open"][i], "h": q["high"][i], "l": q["low"][i], "c": q["close"][i], "v": q["volume"][i]})
     return out
 
