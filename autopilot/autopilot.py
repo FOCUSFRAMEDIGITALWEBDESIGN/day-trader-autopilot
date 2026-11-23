@@ -84,6 +84,8 @@ DEFAULTS = {
     "tm_hist_min_trades": 8,
     "tm_hist_min_avg_R": None,
     "stop_after_daily_loss_usd": None,
+    "learn_weekly": True,
+    "strategy_version": 1,
     "loop_seconds": 20,
     "scan_delay_seconds": 25,
     "sim": {},
@@ -243,8 +245,39 @@ class Pilot:
         except Exception as e:  # keep the daemon alive; report it
             self.last_error = "%s: %s" % (type(e).__name__, e)
             self.event("error", self.last_error, trace=traceback.format_exc()[-1500:])
+        try:
+            self.maybe_learn(phase, mins)
+        except Exception as e:
+            self.event("error", "learner could not start: %s" % e)
         self.write_status(st, phase)
         self.save()
+
+    # ------------------------------------------------------------ weekly learning
+    def maybe_learn(self, phase, mins):
+        """Start autopilot/learn.py outside trading hours, at most once every 6.5 days."""
+        if self.sim or self.fixed_now or not self.ap.get("learn_weekly", True):
+            return
+        proc = getattr(self, "_learn_proc", None)
+        if proc is not None and proc.poll() is None:
+            return
+        quiet = phase in ("after close", "closed") or (phase == "premarket" and mins < 8 * 60 + 30)
+        if not quiet:
+            return
+        hist = rj(os.path.join(AP, "learning.json"), []) or []
+        last = self.state.get("learn_started") or (hist[-1].get("run_at") if hist else None)
+        if last:
+            try:
+                age = datetime.datetime.now() - datetime.datetime.strptime(last[:16], "%Y-%m-%d %H:%M")
+                if age < datetime.timedelta(days=6.5):
+                    return
+            except ValueError:
+                pass
+        self.state["learn_started"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        log = open(os.path.join(AP, "learn.log"), "a", encoding="utf-8")
+        self._learn_proc = subprocess.Popen([PY, os.path.join(ROOT, "autopilot", "learn.py")], cwd=ROOT,
+                                            stdout=log, stderr=subprocess.STDOUT,
+                                            env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8"))
+        self.event("info", "Lernen gestartet: neue Daten laden und Strategie prüfen (dauert einige Minuten)")
 
     # ------------------------------------------------------------ account
     def sync_account(self):
@@ -579,7 +612,8 @@ class Pilot:
         trade = {"symbol": sym, "status": "open" if fq and float(fq) > 0 else "pending", "order_id": oid,
                  "client_order_id": coid, "at": self.ny().strftime("%H:%M"), "qty": float(order["qty"]),
                  "plan": c.get("plan"), "tm": {k: v for k, v in (c.get("tm") or {}).items() if k != "bands"},
-                 "max_loss": order["plan"]["max_loss"], "fill_price": float(fp) if fp else None,
+                 "max_loss": order["plan"]["max_loss"], "strategy_version": int(self.ap.get("strategy_version", 1)),
+                 "fill_price": float(fp) if fp else None,
                  "fill_recorded": bool(fq and float(fq) > 0), "legs": legs, "exit_price": None, "pnl": None}
         self.state["trades"].append(trade)
         c["result"] = "ORDER PLACED"

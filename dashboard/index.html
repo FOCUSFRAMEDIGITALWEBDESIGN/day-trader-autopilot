@@ -192,6 +192,11 @@ td.num, th.num { text-align: right; white-space: nowrap; }
   </section>
 
   <section class="card">
+    <h2>Lernen: Strategie-Anpassung (wöchentlich)</h2>
+    <div id="learn"><div class="empty">Noch kein Lernlauf. Er startet automatisch außerhalb der Handelszeit, höchstens einmal pro Woche.</div></div>
+  </section>
+
+  <section class="card">
     <h2>Einstellungen (trader/config.json + trader/autopilot.json)</h2>
     <div class="cfg" id="cfg"></div>
   </section>
@@ -319,9 +324,31 @@ function render(s) {
   const show = { "Budget": usd(cfg.budget), "Max. Verlust / Trade": usd(cfg.max_loss_per_trade_usd), "Max. Tagesverlust": usd(cfg.max_daily_loss_usd),
     "Trades / Tag": cfg.max_trades_per_day, "Einstiege": `${cfg.no_entries_before}–${ap.last_entry || cfg.no_entries_after}`, "Flat bis": cfg.flat_by,
     "Opening Range": (ap.or_minutes || 15) + " min", "Stop": ap.stop, "Ziel": ap.target, "Max. % über Range": ap.max_pct_over,
-    "TM min. Edge": (ap.tm_min_edge_pts ?? "–") + " Pkt", "TM min. Ø R": ap.tm_min_avg_R, "Historie min. Ø R": ap.tm_hist_min_avg_R,
+    "TM min. Edge": (ap.tm_min_edge_pts ?? "–") + " Pkt", "TM min. Ø R": ap.tm_min_avg_R, "Wöchentlich lernen": ap.learn_weekly === false ? "aus" : "an",
     "Max. offene Positionen": ap.max_open_positions, "Auto-Freigabe (Paper)": ap.auto_approve_paper ? "an" : "aus" };
   $("cfg").innerHTML = Object.entries(show).map(([k, v]) => `<div><span>${k}</span><span>${esc(v ?? "–")}</span></div>`).join("");
+
+  // learning
+  const L = s.learning || [];
+  if (L.length) {
+    const last = L[L.length - 1], ce = last.current_eval || {}, lv = last.live || {};
+    const fmtR = (v) => v == null ? "–" : (v > 0 ? "+" : "") + (+v).toFixed(2) + " R";
+    const changes = L.filter(r => r.changed).reverse();
+    $("learn").innerHTML = `
+      <div class="cfg" style="margin-bottom:12px">
+        <div><span>Letzter Lauf</span><span>${esc(last.run_at)}</span></div>
+        <div><span>Ergebnis</span><span>${esc(last.result || "–")}</span></div>
+        <div><span>Plan-Version</span><span>v${esc(ap.strategy_version || 1)}</span></div>
+        <div><span>Plan im Test (walk-forward)</span><span>${ce.n ?? "–"} Trades, Ø ${fmtR(ce.mean)}</span></div>
+        <div><span>Plan im Paper-Handel</span><span>${lv.n || 0} Trades${lv.n ? ", Ø " + fmtR(lv.mean) : ""}</span></div>
+      </div>
+      <div class="why" style="margin-bottom:8px">Aktuell: ${esc(last.current || "")}</div>
+      ${(last.top || []).length ? `<div class="tablewrap"><table><thead><tr><th>Kandidat (letzter Lauf)</th><th class="num">Trades</th><th class="num">Ø R</th><th class="num">vorsichtig (Ø − Fehler)</th><th class="num">Treffer</th></tr></thead><tbody>
+        ${last.top.map(r => `<tr><td>${r.current ? "<b>aktuell · </b>" : ""}${esc(r.label)}</td><td class="num">${r.n}</td><td class="num ${cls(r.mean)}">${fmtR(r.mean)}</td><td class="num ${cls(r.lcb)}">${fmtR(r.lcb)}</td><td class="num">${r.win_pct ?? "–"} %</td></tr>`).join("")}
+      </tbody></table></div>` : ""}
+      ${changes.length ? `<div class="why" style="margin-top:10px"><b>Wechsel:</b> ${changes.map(r => esc(r.run_at.slice(0, 10) + ": " + r.new)).join(" · ")}</div>` : ""}`;
+  }
+  if (s.pause_reason && /learner/.test(s.pause_reason)) { $("err").style.display = "block"; $("err").textContent = "⏸ " + s.pause_reason; }
 
   drawEquity(s.equity || []);
 }

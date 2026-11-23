@@ -79,6 +79,18 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Selbst lernen (wöchentlich)
+
+Einmal pro Woche außerhalb der Handelszeit startet der Autopilot `autopilot/learn.py` von selbst
+(von Hand: `python autopilot/learn.py`). Es lädt die neuesten 60 Tage, prüft rund 230 Strategie-Varianten
+und testet die besten walk-forward mit der Time Machine, so wie der Autopilot handelt.
+**Gewechselt wird nur, wenn der neue Plan deutlich besser ist** (vorsichtige Schätzung: Ø R minus
+Standardfehler, mindestens +0,03 R Vorsprung, mindestens 25 Trades, Ø R positiv). Sonst bleibt der Plan.
+Läuft der aktuelle Plan im Paper-Handel schlecht (≥ 15 Trades, Ø schlechter als −0,30 R), pausiert er neue
+Einstiege und schreibt den Grund ins Dashboard.
+Das Lernmodul ändert nie Budget, Verlustlimits, Trades pro Tag oder Paper-Modus, nur die Auswahl der Setups.
+Abschalten: `"learn_weekly": false` in `trader/autopilot.json`.
+
 ## Tests
 
 ```bash

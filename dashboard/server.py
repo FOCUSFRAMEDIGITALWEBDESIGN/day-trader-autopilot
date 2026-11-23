@@ -49,6 +49,12 @@ def state():
     for e in s["events"]:
         e.pop("data", None) if e.get("level") != "error" else None
     s["pause_file"] = os.path.exists(os.path.join(AP, "PAUSE"))
+    try:
+        with open(os.path.join(AP, "PAUSE"), encoding="utf-8") as f:
+            s["pause_reason"] = f.read().strip()
+    except OSError:
+        s["pause_reason"] = None
+    s["learning"] = (rj(os.path.join(AP, "learning.json"), []) or [])[-12:]
     return s
 
 
