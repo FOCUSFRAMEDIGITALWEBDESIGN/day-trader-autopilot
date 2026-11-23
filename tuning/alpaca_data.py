@@ -61,8 +61,8 @@ def fetch_history(symbols, years=2, log=print, api=None, max_age_hours=20):
         key, secret = load_keys(ROOT)
         api = Alpaca(key, secret)
     os.makedirs(OUT, exist_ok=True)
-    end = (datetime.datetime.utcnow() - datetime.timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = (datetime.datetime.utcnow() - datetime.timedelta(days=int(365 * years))).strftime("%Y-%m-%dT00:00:00Z")
+    end = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=int(365 * years))).strftime("%Y-%m-%dT00:00:00Z")
     feed, ok = "sip", 0
     for sym in symbols:
         p = os.path.join(OUT, "%s-alpaca5m.json.gz" % sym)

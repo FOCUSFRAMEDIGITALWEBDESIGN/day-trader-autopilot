@@ -36,7 +36,7 @@ def sessions_of(path):
     with gzip.open(path, "rt") as f:
         text = f.read()
     res = tm.chart_result(text, os.path.basename(path).split("-")[0])
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     _, bars, _ = tm.parse_bars(res, now)
     days = tm.split_sessions(bars)
     full, _ = tm.full_sessions(days, "9999-12-31")
