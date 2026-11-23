@@ -3,3 +3,4 @@ trader/
 tuning/data/
 __pycache__/
 *.pyc
+tuning/data_alpaca/

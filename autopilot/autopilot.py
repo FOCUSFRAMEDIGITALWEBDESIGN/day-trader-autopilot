@@ -20,6 +20,7 @@ import argparse
 import datetime
 import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
@@ -51,6 +52,8 @@ def _mod(name, rel):
 
 clockmod = _mod("ap_alerts", TOOLS["alerts"])
 entrymod = _mod("ap_entry", TOOLS["entry"])
+tmmod = _mod("ap_tm", TOOLS["tm"])
+import features as fx  # noqa: E402  (shared with the backtest and the learner)
 ticketmod = _mod("ap_ticket", TOOLS["ticket"])
 
 DEFAULTS = {
@@ -84,6 +87,12 @@ DEFAULTS = {
     "tm_hist_min_trades": 8,
     "tm_hist_min_avg_R": None,
     "stop_after_daily_loss_usd": None,
+    "rvol_min": 0,
+    "market_filter": "none",
+    "rs_min": None,
+    "exit_mode": "fixed",
+    "exit_at_R": 1.0,
+    "learn_years": 2,
     "learn_weekly": True,
     "strategy_version": 1,
     "loop_seconds": 20,
@@ -461,9 +470,16 @@ class Pilot:
             gap = self.day_open_vs_prev(sym)
             if gap is not None and gap < 0:
                 return self.reject(c, "entry", "opened %.2f%% under yesterday's close: gap filter" % gap)
-        self.ok(c, "entry", "triggered %s at %.2f (%+.2f%% over %.2f)" % (
-            trig["time"], trig["price"], trig["pct_over"], js["level"]), trigger=trig,
-            opening_range=js.get("opening_range"))
+        if self.ap.get("rvol_min") or self.ap.get("market_filter") not in (None, "none") \
+                or self.ap.get("rs_min") is not None:
+            f = self.live_features(sym, int(trig["bar_index"]), int(self.ap["or_minutes"]) // 5)
+            c["features"] = f
+            ok, why = fx.passes(f, self.ap)
+            if not ok:
+                return self.reject(c, "entry", "filter: " + why)
+        self.ok(c, "entry", "triggered %s at %.2f (%+.2f%% over %.2f)%s" % (
+            trig["time"], trig["price"], trig["pct_over"], js["level"], self.feature_note(c.get("features"))),
+            trigger=trig, opening_range=js.get("opening_range"))
 
         # 4. exit plan
         code, js, err = self.tool_json("exit", "plan", "--stop", self.ap["stop"], "--target", self.ap["target"],
@@ -511,9 +527,10 @@ class Pilot:
             100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"], edge, mc["avg_R"]))
 
         # fresh price for budget and risk (the higher price means a bigger risk, fewer shares)
-        code = 0 if self.sim else self.tool("alerts", "quote", sym, "--write", now=False, timeout=60)[0]
-        if code != 0:
-            last = self.broker.latest_trade(sym)
+        last = None if self.sim else self.broker.latest_trade(sym)   # Alpaca, real time
+        code = 0 if (self.sim or last) else self.tool("alerts", "quote", sym, "--write", now=False, timeout=60)[0]
+        if last or code != 0:
+            last = last or self.broker.latest_trade(sym)
             if last:
                 pr = rj(os.path.join(T, "prices.json"), {}) or {}
                 pr.setdefault("prices", {})[sym] = last
@@ -558,11 +575,64 @@ class Pilot:
         except Exception:
             return None
         prev = ch.get("prev_close")
-        first = next((b for b in ch["bars"] if clockmod.to_eastern(datetime.datetime.utcfromtimestamp(b["t"]))
+        first = next((b for b in ch["bars"] if clockmod.to_eastern(datetime.datetime.fromtimestamp(b["t"], datetime.timezone.utc).replace(tzinfo=None))
                       .strftime("%Y-%m-%d %H:%M") == today.isoformat() + " 09:30"), None)
         if not prev or not first:
             return None
         return (first["o"] - float(prev)) / float(prev) * 100
+
+    def _sessions(self, sym, rng):
+        """(today {slot: bar}, past full sessions) for a symbol, from Yahoo or a sim file."""
+        key = (sym, rng, self.ny().strftime("%H%M"))
+        cache = self.__dict__.setdefault("_chart_cache", {})
+        if key in cache:
+            return cache[key]
+        off = (self.ap.get("sim") or {}).get("spy" if sym == "SPY" else "tm") if self.sim else None
+        if off:
+            text = entrymod.read_text(os.path.join(ROOT, off))
+        else:
+            text = entrymod.yahoo_get(entrymod.chart_path(sym, rng, "5m"))
+        res = tmmod.chart_result(text, sym)
+        _, bars, _ = tmmod.parse_bars(res, self.now_utc())
+        days = tmmod.split_sessions(bars)
+        today = self.ny().date().isoformat()
+        past, _ = tmmod.full_sessions(days, today)
+        out = (days.get(today, {}), [D for _, D in past])
+        cache[key] = out
+        return out
+
+    def live_features(self, sym, k, n):
+        f = {"rvol": None, "market_ok": True, "rs": None}
+        try:
+            D, past = self._sessions(sym, "1mo")
+            f["rvol"] = fx.rvol(D, past, n)
+        except Exception as e:
+            f["note"] = "stock data: %s" % str(e)[:80]
+            D = None
+        try:
+            spy, _ = self._sessions("SPY", "5d")
+            f["market_ok"] = fx.market_ok(spy, k, self.ap.get("market_filter") or "green")
+            f["rs"] = fx.rel_strength(D, spy, k) if D else None
+            f["spy_change"] = fx.day_change(spy, k)
+        except Exception as e:
+            f["note"] = (f.get("note", "") + " SPY: %s" % str(e)[:80]).strip()
+        for x in ("rvol", "rs", "spy_change"):
+            if f.get(x) is not None:
+                f[x] = round(f[x], 2)
+        return f
+
+    @staticmethod
+    def feature_note(f):
+        if not f:
+            return ""
+        bits = []
+        if f.get("rvol") is not None:
+            bits.append("RVOL %.1fx" % f["rvol"])
+        if f.get("spy_change") is not None:
+            bits.append("SPY %+.2f%%" % f["spy_change"])
+        if f.get("rs") is not None:
+            bits.append("vs SPY %+.2f pts" % f["rs"])
+        return ("; " + ", ".join(bits)) if bits else ""
 
     # ------------------------------------------------------------ the broker step
     def approve(self, order, index=1):
@@ -613,6 +683,8 @@ class Pilot:
                  "client_order_id": coid, "at": self.ny().strftime("%H:%M"), "qty": float(order["qty"]),
                  "plan": c.get("plan"), "tm": {k: v for k, v in (c.get("tm") or {}).items() if k != "bands"},
                  "max_loss": order["plan"]["max_loss"], "strategy_version": int(self.ap.get("strategy_version", 1)),
+                 "exit_mode": self.ap.get("exit_mode", "fixed"), "exit_at_R": float(self.ap.get("exit_at_R", 1.0)),
+                 "features": c.get("features"),
                  "fill_price": float(fp) if fp else None,
                  "fill_recorded": bool(fq and float(fq) > 0), "legs": legs, "exit_price": None, "pnl": None}
         self.state["trades"].append(trade)
@@ -643,20 +715,81 @@ class Pilot:
             if fq > 0 and not t.get("fill_recorded"):
                 self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "buy", "--qty", fq, "--price", fp)
                 t.update(fill_recorded=True, fill_price=float(fp), status="open", qty=fq)
-            for leg in o.get("legs") or []:
+            legs = o.get("legs") or []
+            if t.get("oco_id"):  # after a partial exit the rest is protected by an OCO pair
+                oco = self.broker.order(t["oco_id"]) or {}
+                legs = [oco] + (oco.get("legs") or [])
+            for leg in legs:
                 if leg.get("status") == "filled" and leg["id"] not in t.setdefault("legs_recorded", []):
                     q, p = float(leg["filled_qty"]), float(leg["filled_avg_price"])
                     self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "sell", "--qty", q, "--price", p)
                     t["legs_recorded"].append(leg["id"])
-                    self.close_trade(t, p, "target" if leg.get("type") == "limit" else "stop")
+                    self.close_trade(t, p, "target" if leg.get("type") == "limit" else "stop", qty=q)
+                    break
+            if t.get("status") == "open" and t.get("fill_recorded"):
+                self.manage_exit(t, legs)
 
-    def close_trade(self, t, price, how):
+    def manage_exit(self, t, legs):
+        """Breakeven / partial exit once the price is exit_at_R x risk above the fill."""
+        mode = t.get("exit_mode") or "fixed"
+        if mode == "fixed" or t.get("exit_adjusted"):
+            return
+        plan = t.get("plan") or {}
+        risk, fill = plan.get("risk_per_share"), t.get("fill_price")
+        if not risk or not fill:
+            return
+        trig = fill + float(t.get("exit_at_R", 1.0)) * risk
+        px = self.broker.latest_trade(t["symbol"])
+        if not px or float(px) < trig:
+            return
+        be = round(math.ceil(fill * 100) / 100, 2)
+        stop_leg = next((l for l in legs if l.get("type") == "stop" and l.get("status") in ("new", "held", "accepted")), None)
+        tp_leg = next((l for l in legs if l.get("type") == "limit" and l.get("status") in ("new", "held", "accepted")), None)
+        half = int(t["qty"] // 2)
+        if mode == "partial" and half >= 1 and tp_leg and stop_leg:
+            for l in (tp_leg, stop_leg):
+                self.broker.cancel(l["id"])
+            time.sleep(0 if self.sim else 1.5)
+            try:
+                sold = self.broker.submit_raw({"symbol": t["symbol"], "qty": str(half), "side": "sell", "type": "market",
+                                               "time_in_force": "day"})
+                sold = self.broker.wait_fill(sold["id"], seconds=4 if self.sim else 15) or sold
+                rest = t["qty"] - half
+                oco = self.broker.submit_raw({"symbol": t["symbol"], "qty": str(int(rest)), "side": "sell", "type": "limit",
+                                              "time_in_force": "day", "order_class": "oco",
+                                              "take_profit": {"limit_price": "%.2f" % plan["target"]},
+                                              "stop_loss": {"stop_price": "%.2f" % be}})
+            except AlpacaError as e:
+                self.event("error", "%s: partial exit failed (%s); flatten at %s will close it" % (
+                    t["symbol"], e, self.cfg.get("flat_by", "15:55")))
+                t["exit_adjusted"] = "failed"
+                return
+            p = float(sold.get("filled_avg_price") or px)
+            self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "sell", "--qty", half, "--price", p)
+            t["partials"] = t.get("partials", []) + [{"qty": half, "price": p}]
+            t.update(oco_id=oco["id"], exit_adjusted="partial", stop_now=be, qty_open=rest)
+            self.event("trade", "%s: +%.1fR reached, sold %d at %.2f, the rest runs to %.2f with the stop at entry %.2f"
+                       % (t["symbol"], t.get("exit_at_R", 1.0), half, p, plan["target"], be))
+        elif stop_leg:
+            try:
+                self.broker.replace(stop_leg["id"], stop_price="%.2f" % be)
+            except AlpacaError as e:
+                self.event("error", "%s: could not move the stop to %.2f: %s" % (t["symbol"], be, e))
+                t["exit_adjusted"] = "failed"
+                return
+            t.update(exit_adjusted="breakeven", stop_now=be)
+            self.event("trade", "%s: +%.1fR reached, stop moved to the entry %.2f" % (t["symbol"], t.get("exit_at_R", 1.0), be))
+
+    def close_trade(self, t, price, how, qty=None):
+        fill = t.get("fill_price") or price
+        parts = t.get("partials", [])
+        rest = qty if qty is not None else (t.get("qty_open") or t["qty"])
         t["exit_price"] = price
         t["status"] = how
         t["closed_at"] = self.ny().strftime("%H:%M")
-        t["pnl"] = round((price - (t.get("fill_price") or price)) * t["qty"], 2)
+        t["pnl"] = round(sum((p["price"] - fill) * p["qty"] for p in parts) + (price - fill) * rest, 2)
         risk = (t.get("plan") or {}).get("risk_per_share")
-        t["R"] = round((price - (t.get("fill_price") or price)) / risk, 2) if risk else None
+        t["R"] = round(t["pnl"] / (risk * t["qty"]), 2) if risk and t["qty"] else None
         self.state["realized"] = round(self.state.get("realized", 0) + t["pnl"], 2)
         self.event("trade", "%s %s closed at %.2f (%s): P&L $%+.2f" % (
             "TARGET" if how == "target" else "STOP" if how == "stop" else "FLAT", t["symbol"], price, how, t["pnl"]))
@@ -671,7 +804,11 @@ class Pilot:
             o = self.broker.order(t["order_id"]) or {}
             if o.get("status") in ("new", "accepted", "pending_new", "partially_filled"):
                 self.broker.cancel(t["order_id"])
-            for leg in o.get("legs") or []:
+            legs = list(o.get("legs") or [])
+            if t.get("oco_id"):
+                oco = self.broker.order(t["oco_id"]) or {}
+                legs += [oco] + (oco.get("legs") or [])
+            for leg in legs:
                 if leg.get("status") in ("new", "accepted", "held", "pending_new", "partially_filled"):
                     self.broker.cancel(leg["id"])
             time.sleep(0 if self.sim else 2)
@@ -703,7 +840,7 @@ class Pilot:
             if fq and fp and float(fq) > 0:
                 args += ["--filled-qty", fq, "--filled-price", fp]
                 self.tool("ticket", *args)
-                self.close_trade(t, float(fp), "flat")
+                self.close_trade(t, float(fp), "flat", qty=float(fq))
             else:
                 self.tool("ticket", *args)
                 t["flat_order_id"] = res["id"]

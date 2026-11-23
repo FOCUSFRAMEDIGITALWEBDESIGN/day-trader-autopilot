@@ -85,5 +85,13 @@
  "tm_hist_min_avg_R": null,
  "stop_after_daily_loss_usd": 150,
  "loop_seconds": 20,
- "scan_delay_seconds": 25
+ "scan_delay_seconds": 25,
+ "rvol_min": 0,
+ "market_filter": "none",
+ "rs_min": null,
+ "exit_mode": "fixed",
+ "exit_at_R": 1.0,
+ "learn_years": 2,
+ "learn_weekly": true,
+ "strategy_version": 1
 }

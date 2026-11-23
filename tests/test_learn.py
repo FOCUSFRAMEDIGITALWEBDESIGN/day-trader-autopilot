@@ -26,10 +26,12 @@ class Learn(unittest.TestCase):
             json.dump({"strategy_version": 3, "symbols": []}, open(os.path.join(learn.T, "autopilot.json"), "w"))
             trades = [{"R": -0.8, "strategy_version": 3}] * 16 + [{"R": 2.0, "strategy_version": 2}] * 10
             json.dump([{"date": "2026-11-20", "trades": trades}], open(os.path.join(learn.AP, "history.json"), "w"))
-            old_data = learn.DATA
-            learn.DATA = os.path.join(d, "nodata")
-            learn.main(["--no-fetch"])
-            learn.DATA = old_data
+            old_load = learn.rsch.load
+            learn.rsch.load = lambda symbols=None: ({}, "yahoo")     # no data -> nothing can switch
+            try:
+                learn.main(["--no-fetch"])
+            finally:
+                learn.rsch.load = old_load
             self.assertTrue(os.path.exists(os.path.join(learn.AP, "PAUSE")))
             rec = json.load(open(os.path.join(learn.AP, "learning.json")))[-1]
             self.assertEqual(rec["live"]["n"], 16)          # only the current plan's trades count

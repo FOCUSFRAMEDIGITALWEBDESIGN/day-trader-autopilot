@@ -7,7 +7,7 @@ Market orders fill at once at the --price given for the symbol. Bracket legs wai
 """
 import argparse, json, threading, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 S = {"cash": 100000.0, "orders": {}, "positions": {}, "prices": {}}
 LOCK = threading.Lock()
@@ -26,6 +26,15 @@ def _pos_fill(sym, side, qty, price):
         S["cash"] += qty * price
     if p["qty"] <= 1e-9:
         S["positions"].pop(sym, None)
+
+
+def _cancel_family(o):
+    """OCO semantics: when one exit of a pair fills or is canceled, the other is canceled."""
+    root = o.get("parent") or o["id"]
+    for x in S["orders"].values():
+        if x["id"] != o["id"] and x["status"] in ("new", "held") and (
+                x.get("parent") == root or (x["id"] == root and x.get("order_class") == "oco")):
+            x["status"] = "canceled"
 
 
 def _order_view(o):
@@ -71,6 +80,19 @@ class H(BaseHTTPRequestHandler):
             if path.startswith("/v2/orders/"):
                 o = S["orders"].get(path.rsplit("/", 1)[1])
                 return self._send(200, _order_view(o)) if o else self._send(404, {"message": "not found"})
+            if path.startswith("/v2/stocks/") and path.endswith("/bars"):
+                q = parse_qs(urlparse(self.path).query)
+                if q.get("feed", [""])[0] == "sip" and S.get("deny_sip"):
+                    return self._send(403, {"message": "subscription does not permit querying recent SIP data"})
+                bars = S.get("bars", {}).get(path.split("/")[3], [])
+                start = int(q.get("page_token", ["0"])[0])
+                lim = int(q.get("limit", ["10000"])[0])
+                page = bars[start:start + lim]
+                nxt = str(start + lim) if start + lim < len(bars) else None
+                return self._send(200, {"bars": page, "next_page_token": nxt})
+            if path.startswith("/v2/stocks/") and path.endswith("/trades/latest"):
+                sym = path.split("/")[3]
+                return self._send(200, {"symbol": sym, "trade": {"p": S["prices"].get(sym)}})
             if path == "/mock/state":
                 return self._send(200, {k: v for k, v in S.items()})
         self._send(404, {"message": "unknown"})
@@ -91,10 +113,20 @@ class H(BaseHTTPRequestHandler):
                 sym, qty, side = b["symbol"], float(b["qty"]), b["side"]
                 if side == "sell" and S["positions"].get(sym, {}).get("qty", 0) < qty:
                     return self._send(403, {"message": "insufficient qty available for order"})
-                held = sum(float(S["orders"][l]["qty"]) for o in S["orders"].values() if o["symbol"] == sym
-                           for l in o.get("leg_ids", []) if S["orders"][l]["status"] in ("new", "held") and S["orders"][l]["type"] == "limit")
-                if side == "sell" and held:
+                held = sum(float(o["qty"]) for o in S["orders"].values() if o["symbol"] == sym and o["side"] == "sell"
+                           and o["type"] == "limit" and o["status"] in ("new", "held"))
+                if side == "sell" and held + qty > S["positions"].get(sym, {}).get("qty", 0) + 1e-9:
                     return self._send(403, {"message": "insufficient qty available for order (held for orders)"})
+                if b.get("order_class") == "oco":
+                    oid, lid = str(uuid.uuid4()), str(uuid.uuid4())
+                    S["orders"][lid] = {"id": lid, "parent": oid, "symbol": sym, "side": "sell", "qty": b["qty"], "type": "stop",
+                                        "status": "held", "stop_price": b["stop_loss"]["stop_price"], "filled_qty": "0",
+                                        "filled_avg_price": None}
+                    o = {"id": oid, "symbol": sym, "side": "sell", "qty": b["qty"], "type": "limit", "order_class": "oco",
+                         "status": "new", "limit_price": b["take_profit"]["limit_price"], "filled_qty": "0",
+                         "filled_avg_price": None, "leg_ids": [lid]}
+                    S["orders"][oid] = o
+                    return self._send(200, _order_view(o))
                 px = S["prices"].get(sym)
                 oid = str(uuid.uuid4())
                 o = {"id": oid, "client_order_id": b.get("client_order_id"), "symbol": sym, "side": side, "qty": b["qty"],
@@ -113,19 +145,30 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, _order_view(o))
             if path == "/mock/fill_leg":
                 for o in S["orders"].values():
-                    if o.get("parent") and o["symbol"] == b["symbol"] and o["type"] == b["type"] and o["status"] in ("new", "held"):
+                    is_exit = o.get("parent") or o.get("order_class") == "oco"
+                    if is_exit and o["symbol"] == b["symbol"] and o["type"] == b["type"] and o["status"] in ("new", "held"):
                         px = float(o.get("limit_price") or o.get("stop_price"))
                         o.update(status="filled", filled_qty=o["qty"], filled_avg_price=str(px))
                         _pos_fill(o["symbol"], "sell", float(o["qty"]), px)
-                        for sib in S["orders"].values():
-                            if sib.get("parent") == o["parent"] and sib["id"] != o["id"]:
-                                sib["status"] = "canceled"
+                        _cancel_family(o)
                         return self._send(200, o)
                 return self._send(404, {"message": "no open leg"})
             if path == "/mock/price":
                 S["prices"].update({k: float(v) for k, v in b.items()})
                 return self._send(200, S["prices"])
         self._send(404, {"message": "unknown"})
+
+    def do_PATCH(self):
+        path = urlparse(self.path).path
+        b = self._body()
+        with LOCK:
+            o = S["orders"].get(path.rsplit("/", 1)[1])
+            if not o or o["status"] not in ("new", "held"):
+                return self._send(422, {"message": "order is not replaceable"})
+            for k in ("stop_price", "limit_price", "qty"):
+                if k in b:
+                    o[k] = b[k]
+            return self._send(200, o)
 
     def do_DELETE(self):
         path = urlparse(self.path).path
@@ -136,6 +179,8 @@ class H(BaseHTTPRequestHandler):
             if o["status"] in ("filled", "canceled"):
                 return self._send(422, {"message": "order is not cancelable"})
             o["status"] = "canceled"
+            if o.get("parent") or o.get("order_class") == "oco":
+                _cancel_family(o)
             self.send_response(204)
             self.end_headers()
 

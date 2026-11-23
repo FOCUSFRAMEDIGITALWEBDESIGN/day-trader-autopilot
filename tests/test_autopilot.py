@@ -12,7 +12,8 @@ _s = socket.socket(); _s.bind(("127.0.0.1", 0)); PORT = _s.getsockname()[1]; _s.
 SIM = {"scan": "tests/fixtures/trader-scanner/wall5m-2026-10-19.json.gz",
        "entry": "tests/fixtures/trader-entry/TSLA-2026-10-19-5m.json",
        "tm": "tests/fixtures/trader-timemachine/TSLA-60d5m.json.gz",
-       "news": "tests/fixtures/trader-news"}
+       "news": "tests/fixtures/trader-news",
+       "spy": "tests/fixtures/autopilot/SPY-60d5m.json.gz"}
 
 
 def post(path, body):
@@ -111,6 +112,50 @@ class AutopilotReel(unittest.TestCase):
         st, out = self.tick("2026-10-19 10:15")
         self.assertTrue(st["paused"])
         self.assertEqual(st["day"]["candidates"], [])
+
+    def test_partial_exit_then_stop_at_entry(self):
+        self.autopilot({"target": "2R", "exit_mode": "partial", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99,
+                        "tm_min_avg_R": -9, "tm_replays": 2000})
+        st, out = self.tick("2026-10-19 10:15")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["qty"], t["fill_price"], t["exit_mode"]), (8.0, 364.30, "partial"))
+        post("/mock/price", {"TSLA": 370.30})             # +1R over the fill (364.30 + 5.86)
+        st, out = self.tick("2026-10-19 10:40")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["exit_adjusted"], t["qty_open"], t["stop_now"]), ("partial", 4.0, 364.3))
+        self.assertEqual(mock_broker.S["positions"]["TSLA"]["qty"], 4.0)
+        post("/mock/fill_leg", {"symbol": "TSLA", "type": "stop"})   # the rest stops out at the entry
+        st, out = self.tick("2026-10-19 11:30")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["status"], t["pnl"], t["R"]), ("stop", 24.0, 0.51))
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+        pf = json.load(open(os.path.join(self.d, "trader", "portfolio.json")))
+        self.assertEqual(pf["positions"], [])
+
+    def test_breakeven_moves_the_stop(self):
+        self.autopilot({"target": "2R", "exit_mode": "breakeven", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99,
+                        "tm_min_avg_R": -9, "tm_replays": 2000})
+        self.tick("2026-10-19 10:15")
+        post("/mock/price", {"TSLA": 370.30})
+        st, out = self.tick("2026-10-19 10:40")
+        stop_leg = next(o for o in mock_broker.S["orders"].values() if o.get("type") == "stop")
+        self.assertEqual(stop_leg["stop_price"], "364.30")
+        self.assertEqual(st["day"]["trades"][0]["exit_adjusted"], "breakeven")
+        post("/mock/fill_leg", {"symbol": "TSLA", "type": "stop"})
+        st, out = self.tick("2026-10-19 11:30")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["status"], t["pnl"]), ("stop", 0.0))
+
+    def test_filters_are_measured_and_can_block(self):
+        self.autopilot({"target": "1R", "rs_min": 50.0, "tm_replays": 2000})   # nobody beats SPY by 50 points
+        st, out = self.tick("2026-10-19 10:15")
+        c = st["day"]["candidates"][0]
+        self.assertFalse(c["stages"]["entry"]["ok"])
+        self.assertIn("relative strength", c["why"])
+        f = c["features"]
+        self.assertIsNotNone(f["rvol"])
+        self.assertIsNotNone(f["rs"])
+        self.assertEqual(st["day"]["trades"], [])
 
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")

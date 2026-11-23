@@ -27,6 +27,7 @@ import argparse, datetime, glob, gzip, itertools, json, os, statistics, subproce
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tuning"))
 import backtest as bt  # noqa: E402
+import research as rsch  # noqa: E402
 
 tm = bt.tm
 T = os.path.join(ROOT, "trader")
@@ -40,16 +41,10 @@ LIVE_STOP_R = -0.30
 STAGE2_KEEP = 6
 REPLAYS = 600
 
-# the only keys the learner may change
-GRID = {
-    "or_minutes": [15, 30],
-    "stop": ["or-mid", "or-low"],
-    "target": ["1.5R", "2R", "3R"],
-    "last_entry": ["10:30", "11:30", "12:30"],
-    "max_pct_over": [0.5, 0.75, 0],
-    "min_volume_x": [None, 1.0],
-    "gap_filter": [True, False],
-}
+# the only keys the learner may change (how setups are chosen and exited, never how much is risked)
+KEYS = ["or_minutes", "last_entry", "max_pct_over", "gap_filter", "rvol_min", "market_filter", "rs_min",
+        "stop", "target", "exit_mode", "min_volume_x"]
+GRID = {k: None for k in KEYS}
 EDGES = [0.0, 2.0, 5.0]   # tm_min_edge_pts candidates (stage 2)
 
 
@@ -84,25 +79,13 @@ def to_bt(s):
             "max_risk_pct": float(s.get("max_risk_pct", 2.5))}
 
 
-def key(s):
-    return json.dumps({k: s.get(k) for k in GRID}, sort_keys=True)
-
-
-def label(s, edge=None):
-    return "OR%s %s %s bis %s, ≤%s%% über Range, Vol≥%s, Gap %s%s" % (
-        s["or_minutes"], s["stop"], s["target"], s["last_entry"], s.get("max_pct_over") or "–",
-        s.get("min_volume_x") or "–", "an" if s.get("gap_filter") else "aus",
-        "" if edge is None else ", TM-Edge ≥ %g" % edge)
-
-
-# ---------------------------------------------------------------- data
-def fetch(symbols, log):
+def fetch_yahoo(symbols, log):
     os.makedirs(DATA, exist_ok=True)
     import urllib.request
     ok = 0
     for s in symbols:
         p = os.path.join(DATA, "%s-60d5m.json.gz" % s)
-        if os.path.exists(p) and time.time() - os.path.getmtime(p) < 20 * 3600:
+        if os.path.exists(p) and time.time() - os.path.getmtime(p) < 20 * 3600 and os.path.getsize(p) > 5000:
             ok += 1
             continue
         for host in ("query2", "query1", "query2"):
@@ -111,78 +94,31 @@ def fetch(symbols, log):
                     "https://%s.finance.yahoo.com/v8/finance/chart/%s?interval=5m&range=60d" % (host, s),
                     headers={"User-Agent": "day-trader-skill/2.0"})
                 raw = urllib.request.urlopen(req, timeout=30).read()
+                if len(raw) < 5000:
+                    raise ValueError("empty answer")
                 with gzip.open(p, "wb") as f:
                     f.write(raw)
                 ok += 1
                 break
             except Exception:
-                time.sleep(6)
+                time.sleep(8)
         time.sleep(1.2)
-    log("Daten: %d von %d Aktien aktuell" % (ok, len(symbols)))
+    log("Yahoo (60 Tage): %d von %d Aktien aktuell" % (ok, len(symbols)))
 
 
-def load(symbols):
-    data = {}
-    for s in symbols:
-        p = os.path.join(DATA, "%s-60d5m.json.gz" % s)
-        if not os.path.exists(p):
-            continue
-        try:
-            S = bt.sessions_of(p)
-        except Exception:
-            continue
-        if len(S) >= 40:
-            data[s] = S
-    return data
-
-
-# ---------------------------------------------------------------- evaluation
-def rule_R(data, p, dates_from=None, dates_to=None):
-    out = []
-    for S in data.values():
-        prev = None
-        for d, D in S:
-            r = bt.trade(D, prev, p)
-            prev = D[-1]["c"]
-            if r is None or (dates_from and d < dates_from) or (dates_to and d >= dates_to):
-                continue
-            out.append(r)
-    return out
-
-
-def gated(data, s, recent_from):
-    """Walk-forward with the Time Machine: returns {edge: [R...]} for each EDGES value."""
-    import gate_eval as ge
-    p = to_bt(s)
-    p["stop"] = p["stop"]
-    rule = {"setup": "orb", "or_minutes": p["or_minutes"], "stop_rule": p["stop"], "target_r": p["target_r"]}
-    res = {e: [] for e in EDGES}
-    for S in data.values():
-        for sig in ge.signals(S, p):
-            if sig["date"] < recent_from:
-                continue
-            past = S[max(0, sig["idx"] - 59):sig["idx"]]
-            if len(past) < 20:
-                continue
-            mc = tm.simulate(tm.build_pool(past), sig["entry"], sig["stop"], sig["target"], sig["k"], bt.FLAT_SLOT,
-                             replays=REPLAYS, seed=19)
-            sided = (mc["p_target"] + mc["p_stop"]) or 1e-9
-            edge = (mc["p_target"] / sided - 1 / (1 + p["target_r"])) * 100
-            if mc["avg_R"] < 0:
-                continue
-            for e in EDGES:
-                if edge >= e:
-                    res[e].append(sig["R"])
-    return res
+def fetch(symbols, years, log):
+    """Alpaca's years first (needs the paper keys), Yahoo's 60 days as the fallback."""
+    try:
+        import alpaca_data
+        if alpaca_data.fetch_history(symbols, years, log) >= 15:
+            return
+    except Exception as e:
+        log("Alpaca-Historie nicht verfügbar (%s): nutze Yahoo" % str(e)[:100])
+    fetch_yahoo(symbols, log)
 
 
 def summary(rs):
-    if not rs:
-        return {"n": 0, "mean": None, "lcb": None}
-    m = statistics.mean(rs)
-    se = statistics.stdev(rs) / len(rs) ** 0.5 if len(rs) > 1 else 1.0
-    return {"n": len(rs), "mean": round(m, 4), "lcb": round(m - se, 4),
-            "win_pct": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1)}
+    return rsch.summary(rs)
 
 
 # ---------------------------------------------------------------- live check
@@ -210,16 +146,16 @@ def main(argv=None):
     ap_path = os.path.join(T, "autopilot.json")
     cfg = rj(ap_path) or rj(os.path.join(ROOT, "config", "autopilot.json"), {})
     version = int(cfg.get("strategy_version", 1))
-    cur = {k: cfg.get(k) for k in GRID}
-    for k, v in (("or_minutes", 15), ("stop", "or-mid"), ("target", "2R"), ("last_entry", "11:30"),
-                 ("max_pct_over", 0.75), ("min_volume_x", None), ("gap_filter", True)):
-        if cur.get(k) is None and k != "min_volume_x":
-            cur[k] = v
+    cur = {"or_minutes": 15, "last_entry": "11:30", "max_pct_over": 0.75, "gap_filter": True, "rvol_min": 0,
+           "market_filter": "none", "rs_min": None, "stop": "or-mid", "target": "2R", "exit_mode": "fixed",
+           "min_volume_x": None}
+    cur.update({k: cfg[k] for k in KEYS if k in cfg})
+    cur["min_volume_x"] = None
     cur_edge = float(cfg.get("tm_min_edge_pts", 0.0))
     symbols = [s.upper() for s in cfg.get("symbols", [])] or open(os.path.join(ROOT, "tuning", "universe.txt")).read().split()
-
+    years = float(cfg.get("learn_years", 2))
     record = {"run_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "strategy_version": version,
-              "current": label(cur, cur_edge), "changed": False}
+              "current": rsch.describe(cur, cur_edge), "changed": False}
 
     # live check first: it does not need any data
     live = summary(live_trades(version))
@@ -232,53 +168,54 @@ def main(argv=None):
         record["live_pause"] = True
 
     if not a.no_fetch:
-        fetch(symbols, log)
-    data = load(symbols)
+        fetch(symbols + ["SPY"], years, log)
+    data, src = rsch.load(set(symbols))
     dates = sorted({d for S in data.values() for d, _ in S})
     if len(data) < 15 or len(dates) < 45:
         log("Zu wenig Daten (%d Aktien, %d Tage): nichts geändert" % (len(data), len(dates)))
         record.update(result="zu wenig Daten", log=lines)
         return finish(record, a)
-    split = dates[len(dates) * 2 // 3]       # stage 1: older two thirds vs newest third
-    recent = dates[len(dates) // 3]          # stage 2: walk-forward on the newer two thirds
-    log("%d Aktien, %d Handelstage (%s bis %s)" % (len(data), len(dates), dates[0], dates[-1]))
+    big = src == "alpaca"
+    split = dates[len(dates) * 2 // 3]                                  # stage 1: older 2/3 vs newest 1/3
+    recent = dates[max(len(dates) // 3, len(dates) - 160)]             # stage 2: walk-forward, newest days
+    record["data"] = {"source": src, "symbols": len(data), "days": len(dates), "from": dates[0], "to": dates[-1],
+                      "spy": "SPY" in data}
+    log("Daten: %s, %d Aktien, %d Handelstage (%s bis %s)%s" % (
+        "Alpaca (Jahre)" if big else "Yahoo (60 Tage)", len(data), len(dates), dates[0], dates[-1],
+        "" if "SPY" in data else ", SPY fehlt: Marktfilter ohne Wirkung"))
 
-    # stage 1
-    cands = []
-    for combo in itertools.product(*(GRID[k] for k in GRID)):
-        s = dict(zip(GRID, combo))
-        if hm(s["last_entry"]) < 570 + s["or_minutes"] + 15:
-            continue
-        p = to_bt(s)
-        ins = summary(rule_R(data, p, dates_to=split))
-        oos = summary(rule_R(data, p, dates_from=split))
-        if ins["n"] < 60 or oos["n"] < 25:
-            continue
-        cands.append((ins["mean"] + min(oos["mean"], ins["mean"] + 0.1), s, ins, oos))
-    cands.sort(key=lambda x: -x[0])
-    short = [c[1] for c in cands[:STAGE2_KEEP]]
-    if key(cur) not in {key(s) for s in short}:
-        short.append(cur)
-    log("Stufe 1: %d Varianten geprüft, %d in die engere Wahl" % (len(cands), len(short)))
+    rowsets, results = rsch.screen(data, split, 150 if big else 60, 60 if big else 25)
+    short = [r["settings"] for r in rsch.stage1_pick(results, STAGE2_KEEP)]
+    ck = json.dumps(cur, sort_keys=True)
+    if ck not in {json.dumps(x, sort_keys=True) for x in short}:
+        short.append(dict(cur))
+    log("Stufe 1: %d Kombinationen geprüft, %d in die engere Wahl" % (len(results), len(short)))
 
-    # stage 2
-    results = []
-    for s in short:
-        res = gated(data, s, recent)
+    results2 = []
+    for st in short:
+        key_rs = (int(st["or_minutes"]), st["last_entry"])
+        if key_rs not in rowsets:
+            rowsets[key_rs] = rsch.build_rows(data, *key_rs)
+        res = rsch.gated(data, rowsets[key_rs], st, recent, EDGES, 400 if big else REPLAYS)
         for e in EDGES:
             sm = summary(res[e])
-            results.append({"settings": s, "edge": e, "label": label(s, e), **sm,
-                            "current": key(s) == key(cur) and e == cur_edge})
-    results = [r for r in results if r["n"] > 0]
-    results.sort(key=lambda r: -(r["lcb"] if r["n"] >= MIN_TRADES else -9))
+            if sm["n"]:
+                results2.append(dict(sm, settings=st, edge=e, label=rsch.describe(st, e),
+                                     current=json.dumps(st, sort_keys=True) == ck and e == cur_edge))
+    results = results2
+    min_trades = MIN_TRADES * (3 if big else 1)
+    results.sort(key=lambda r: -(r["lcb"] if r["n"] >= min_trades else -9))
     cur_r = next((r for r in results if r["current"]), {"n": 0, "mean": None, "lcb": None})
-    best = next((r for r in results if r["n"] >= MIN_TRADES), None)
+    best = next((r for r in results if r["n"] >= min_trades), None)
     record["top"] = [{k: r[k] for k in ("label", "n", "mean", "lcb", "win_pct", "current")} for r in results[:8]]
     record["current_eval"] = {k: cur_r.get(k) for k in ("n", "mean", "lcb", "win_pct")}
     log("Aktueller Plan (walk-forward): n=%s, Ø %s R" % (cur_r.get("n"), cur_r.get("mean")))
+    for r in results[:3]:
+        log("  Kandidat: %s → n=%d, Ø %+.3f R (vorsichtig %+.3f)" % (r["label"], r["n"], r["mean"], r["lcb"]))
+    MIN_N = min_trades
 
     switch = bool(best and best["mean"] and best["mean"] > 0 and not best["current"] and
-                  (cur_r.get("lcb") is None or cur_r["n"] < MIN_TRADES or best["lcb"] >= cur_r["lcb"] + MIN_GAIN_R))
+                  (cur_r.get("lcb") is None or cur_r["n"] < MIN_N or best["lcb"] >= cur_r["lcb"] + MIN_GAIN_R))
     if switch:
         record.update(changed=True, new=best["label"], new_eval={k: best[k] for k in ("n", "mean", "lcb", "win_pct")})
         log("NEUER PLAN: %s (n=%d, Ø %+.3f R, untere Schranke %+.3f R)" % (best["label"], best["n"], best["mean"], best["lcb"]))

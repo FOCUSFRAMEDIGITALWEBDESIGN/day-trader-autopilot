@@ -51,6 +51,8 @@ class Alpaca:
         # base_url is only overridable for the local mock broker used by the tests
         self.base = (base_url or PAPER_URL).rstrip("/")
         self.data = (data_url or DATA_URL).rstrip("/")
+        if self.base.startswith("http://127.0.0.1") and not data_url:
+            self.data = self.base  # the mock broker also serves the data endpoints
         if self.base != PAPER_URL and not self.base.startswith("http://127.0.0.1"):
             raise AlpacaError("refusing %s: the autopilot only talks to %s" % (self.base, PAPER_URL))
         if not key or not secret:
@@ -60,6 +62,7 @@ class Alpaca:
                    "Accept": "application/json", "Content-Type": "application/json",
                    "User-Agent": "day-trader-autopilot/1.0"}
         self.timeout = timeout
+        self.page_limit = 10000
         self._account_checked = False
 
     # -------------------------------------------------------------- http
@@ -128,6 +131,31 @@ class Alpaca:
             return (r or {}).get("trade", {}).get("p")
         except AlpacaError:
             return None
+
+    def bars(self, symbol, start, end, timeframe="5Min", feed="sip", page_token=None, limit=None):
+        """One page of historical bars from Alpaca's market-data API (free with paper keys).
+        Returns (bars, next_page_token)."""
+        q = {"timeframe": timeframe, "start": start, "end": end, "feed": feed, "limit": limit or self.page_limit,
+             "adjustment": "split", "sort": "asc"}
+        if page_token:
+            q["page_token"] = page_token
+        r = self._req("GET", "%s/v2/stocks/%s/bars?%s" % (self.data, urllib.parse.quote(symbol),
+                                                         urllib.parse.urlencode(q)), retries=4) or {}
+        return r.get("bars") or [], r.get("next_page_token")
+
+    def replace(self, order_id, **fields):
+        """PATCH an open order, e.g. a bracket's stop-loss leg: replace(id, stop_price="364.30")."""
+        return self._req("PATCH", self.base + "/v2/orders/" + order_id,
+                         {k: str(v) for k, v in fields.items()}, retries=1)
+
+    def submit_raw(self, body):
+        """An exit order the autopilot builds itself (a market sell of part of a position,
+        or an OCO pair protecting the rest). Sells only."""
+        if body.get("side") != "sell":
+            raise AlpacaError("submit_raw only sends sells")
+        if not self._account_checked:
+            self.account()
+        return self._req("POST", self.base + "/v2/orders", body, retries=1)
 
     # -------------------------------------------------------------- orders
     def submit(self, ticket, client_order_id=None):

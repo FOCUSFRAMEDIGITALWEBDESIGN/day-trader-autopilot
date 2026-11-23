@@ -268,13 +268,17 @@ function render(s) {
 
   // positions
   $("positions").innerHTML = open.length ? open.map(t => {
-    const p = t.plan || {}, lo = p.stop, hi = p.target, e = t.fill_price || p.entry, now = t.last || e;
+    const p = t.plan || {}, lo = t.stop_now || p.stop, hi = p.target, e = t.fill_price || p.entry, now = t.last || e;
+    const banked = (t.partials || []).reduce((a, x) => a + (x.price - e) * x.qty, 0), openQty = t.qty_open || t.qty;
+    const pnlNow = banked + (now - e) * openQty;
     const span = (hi - lo) || 1, at = (v) => Math.max(0, Math.min(100, 100 * (v - lo) / span));
-    return `<div class="pos"><div class="top"><div><span class="sym">${esc(t.symbol)}</span> · ${t.qty} Stück · seit ${esc(t.at)}</div>
-      <div><span class="${cls(now - e)}">${usd((now - e) * t.qty, true)}</span> · max. Verlust ${usd(t.max_loss)}</div></div>
+    const EX = { breakeven: "Stop auf Einstieg ab 1R", partial: "halb bei 1R" };
+    const adj = t.exit_adjusted === "partial" ? ` · <b class="up">halb verkauft, Stop auf ${px(t.stop_now)}</b>` : t.exit_adjusted === "breakeven" ? ` · <b class="up">Stop auf Einstieg ${px(t.stop_now)}</b>` : (EX[t.exit_mode] ? ` · Ausstieg: ${EX[t.exit_mode]}` : "");
+    return `<div class="pos"><div class="top"><div><span class="sym">${esc(t.symbol)}</span> · ${t.qty_open || t.qty} Stück · seit ${esc(t.at)}${adj}</div>
+      <div><span class="${cls(pnlNow)}">${usd(pnlNow, true)}</span> · ${t.stop_now ? "Risiko jetzt $0" : "max. Verlust " + usd(t.max_loss)}</div></div>
       <div class="ladder" role="img" aria-label="Kurs ${px(now)} zwischen Stop ${px(lo)} und Ziel ${px(hi)}">
         <div class="line"></div><div class="tick" style="left:${at(e)}%"></div><div class="now" style="left:${at(now)}%" title="aktuell ${px(now)}"></div>
-        <div class="lab" style="left:0%;transform:none">Stop ${px(lo)}</div><div class="lab" style="left:${at(e)}%">Einstieg ${px(e)}</div>
+        <div class="lab" style="left:0%;transform:none">Stop ${px(lo)}${t.stop_now ? " = Einstieg" : ""}</div>${t.stop_now ? "" : `<div class="lab" style="left:${at(e)}%">Einstieg ${px(e)}</div>`}
         <div class="lab" style="left:100%;transform:translateX(-100%)">Ziel ${px(hi)}</div></div></div>`;
   }).join("") : `<div class="empty">Keine offene Position.</div>`;
 
@@ -291,7 +295,10 @@ function render(s) {
   $("cands").innerHTML = cands.length ? cands.map(c => {
     const st = STAGES.map(([k, n]) => { const x = c.stages?.[k]; return `<span class="chip ${x ? (x.ok ? "ok" : "no") : ""}" title="${esc(x?.note || "nicht erreicht")}">${x ? (x.ok ? "✓" : "✗") : "·"} ${n}</span>`; }).join("");
     const p = c.plan, tm = c.tm;
-    const plan = p ? `${px(p.entry)} → Stop ${px(p.stop)} / Ziel ${px(p.target)}` : "–";
+    const fe = c.features || {};
+    const feat = [fe.rvol != null ? `RVOL ${(+fe.rvol).toFixed(1)}×` : null, fe.spy_change != null ? `SPY ${fe.spy_change > 0 ? "+" : ""}${(+fe.spy_change).toFixed(2)} %` : null,
+      fe.rs != null ? `vs SPY ${fe.rs > 0 ? "+" : ""}${(+fe.rs).toFixed(2)} Pkt` : null].filter(Boolean).join(" · ");
+    const plan = (p ? `${px(p.entry)} → Stop ${px(p.stop)} / Ziel ${px(p.target)}` : "–") + (feat ? `<br><span class="meta">${esc(feat)}</span>` : "");
     const odds = tm ? `<div class="odds" title="Ziel ${pct(tm.p_target)}, Stop ${pct(tm.p_stop)}, keins ${pct(tm.p_neither)}">
       <span class="c-target" style="width:${100 * tm.p_target}%"></span><span class="c-stop" style="width:${100 * tm.p_stop}%"></span><span class="c-neither" style="width:${100 * tm.p_neither}%"></span></div>
       <div class="why">${pct(tm.p_target)} / ${pct(tm.p_stop)} · Edge ${tm.edge_pts > 0 ? "+" : ""}${tm.edge_pts} Pkt · Ø ${tm.avg_R} R${tm.hist?.triggered ? ` · Historie ${tm.hist.triggered}×: Ø ${tm.hist.avg_R} R` : ""}</div>` : "–";
@@ -325,7 +332,10 @@ function render(s) {
     "Trades / Tag": cfg.max_trades_per_day, "Einstiege": `${cfg.no_entries_before}–${ap.last_entry || cfg.no_entries_after}`, "Flat bis": cfg.flat_by,
     "Opening Range": (ap.or_minutes || 15) + " min", "Stop": ap.stop, "Ziel": ap.target, "Max. % über Range": ap.max_pct_over,
     "TM min. Edge": (ap.tm_min_edge_pts ?? "–") + " Pkt", "TM min. Ø R": ap.tm_min_avg_R, "Wöchentlich lernen": ap.learn_weekly === false ? "aus" : "an",
-    "Max. offene Positionen": ap.max_open_positions, "Auto-Freigabe (Paper)": ap.auto_approve_paper ? "an" : "aus" };
+    "Max. offene Positionen": ap.max_open_positions,
+    "Ausstieg": ({ fixed: "fest", breakeven: "Stop auf Einstieg ab 1R", partial: "halb bei 1R, Rest mit Stop auf Einstieg" })[ap.exit_mode || "fixed"],
+    "Min. relatives Volumen": ap.rvol_min ? ap.rvol_min + "×" : "aus", "Marktfilter (SPY)": ap.market_filter === "green" ? "nur wenn SPY im Plus" : "aus",
+    "Stärker als SPY": ap.rs_min == null ? "aus" : "mind. " + ap.rs_min + " Pkt", "Plan-Version": "v" + (ap.strategy_version || 1), "Auto-Freigabe (Paper)": ap.auto_approve_paper ? "an" : "aus" };
   $("cfg").innerHTML = Object.entries(show).map(([k, v]) => `<div><span>${k}</span><span>${esc(v ?? "–")}</span></div>`).join("");
 
   // learning
@@ -339,6 +349,7 @@ function render(s) {
         <div><span>Letzter Lauf</span><span>${esc(last.run_at)}</span></div>
         <div><span>Ergebnis</span><span>${esc(last.result || "–")}</span></div>
         <div><span>Plan-Version</span><span>v${esc(ap.strategy_version || 1)}</span></div>
+        <div><span>Daten</span><span>${last.data ? esc((last.data.source === "alpaca" ? "Alpaca, " : "Yahoo, ") + last.data.days + " Tage, " + last.data.symbols + " Aktien") : "–"}</span></div>
         <div><span>Plan im Test (walk-forward)</span><span>${ce.n ?? "–"} Trades, Ø ${fmtR(ce.mean)}</span></div>
         <div><span>Plan im Paper-Handel</span><span>${lv.n || 0} Trades${lv.n ? ", Ø " + fmtR(lv.mean) : ""}</span></div>
       </div>

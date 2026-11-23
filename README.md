@@ -91,13 +91,28 @@ Einstiege und schreibt den Grund ins Dashboard.
 Das Lernmodul ändert nie Budget, Verlustlimits, Trades pro Tag oder Paper-Modus, nur die Auswahl der Setups.
 Abschalten: `"learn_weekly": false` in `trader/autopilot.json`.
 
+## Filter und Ausstiege (vom Lernmodul gewählt)
+
+| Einstellung (`trader/autopilot.json`) | Wirkung |
+| --- | --- |
+| `rvol_min` | nur Aktien mit hohem **relativem Volumen** in den ersten Minuten (z. B. 1.5 = 150 % des Üblichen) |
+| `market_filter: "green"` | nur kaufen, wenn der **Gesamtmarkt (SPY)** seit Eröffnung im Plus ist |
+| `rs_min` | Aktie muss seit Eröffnung **stärker als SPY** sein (0 = mindestens gleich stark) |
+| `exit_mode: "breakeven"` | ab +1R wird der **Stop auf den Einstieg** gezogen |
+| `exit_mode: "partial"` | ab +1R wird die **Hälfte verkauft**, der Rest läuft mit Stop auf Einstieg zum Ziel |
+
+Preise für Größe und Ausstiege kommen in Echtzeit von Alpaca (Yahoo nur als Ersatz).
+Das Lernmodul lädt mit deinen Paper-Keys **2 Jahre 5-Minuten-Kerzen von Alpaca** (`learn_years`) und testet
+alle Kombinationen darauf; ohne Alpaca-Zugang nimmt es Yahoos 60 Tage. Von Hand:
+`python tuning/alpaca_data.py --years 2` und `python tuning/research.py`.
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
-304 Offline-Tests: die Original-Suite des Pakets plus ein kompletter Autopilot-Tag (TSLA, 19.10.2026,
+320 Offline-Tests: die Original-Suite des Pakets plus ein kompletter Autopilot-Tag (TSLA, 19.10.2026,
 echte Daten) gegen einen lokalen Mock-Broker: Einstieg, Take-Profit, Glattstellen um 15:55, Pause,
 Time-Machine-Sperre, Live-Sperre.
 
