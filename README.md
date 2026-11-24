@@ -24,6 +24,11 @@ trader-risk muss jede exakte Order mit PASS freigeben, die Time Machine muss ein
 - Keys nur in `.env` / Umgebungsvariablen, nie im Chat, nie im Log.
 - Jede automatische Freigabe steht in `trader/state/broker.json` mit `"approved_by": "autopilot"`.
 
+## In der Cloud (Railway)
+
+Siehe [DEPLOY-RAILWAY.md](DEPLOY-RAILWAY.md): Repository mit Railway verbinden, vier Variablen setzen,
+Volume auf `/app/trader`, Domain erzeugen. Der PC kann dann aus bleiben.
+
 ## Einrichten unter Windows
 
 1. Python installieren: <https://www.python.org/downloads/>, Haken bei **„Add python.exe to PATH“**.
