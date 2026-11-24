@@ -718,6 +718,13 @@ class Pilot:
         ok, last = self.step_price(c, plan, "sell")
         if not ok:
             return
+        # can it be shorted at all? (Alpaca: shortable and easy to borrow)
+        try:
+            asset = self.broker.get("/v2/assets/" + sym)
+        except AlpacaError:
+            asset = None
+        if asset and not (asset.get("shortable") and asset.get("easy_to_borrow")):
+            return self.reject(c, "budget", "Alpaca cannot short %s (not shortable / hard to borrow)" % sym)
         # 6. budget (mirror of trader-budget)
         pf = rj(os.path.join(T, "portfolio.json"), {}) or {}
         order, why = shorts.size_short(self.cfg, plan, price=last, cash=pf.get("cash"))

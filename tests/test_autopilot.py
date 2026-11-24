@@ -239,6 +239,17 @@ class AutopilotReel(unittest.TestCase):
         pf = json.load(open(os.path.join(self.d, "trader", "portfolio.json")))
         self.assertEqual([p for p in pf["positions"] if p["ticker"] == "TSLA"], [])
 
+    def test_short_refused_when_hard_to_borrow(self):
+        self.short_setup({})
+        mock_broker.S["assets"] = {"TSLA": {"symbol": "TSLA", "shortable": True, "easy_to_borrow": False}}
+        try:
+            st, out = self.tick("2026-10-19 10:15")
+        finally:
+            mock_broker.S.pop("assets", None)
+        c = st["day"]["candidates"][0]
+        self.assertIn("hard to borrow", c["why"])
+        self.assertEqual(mock_broker.S["orders"], {})
+
     def test_short_flat_by_close_and_partial(self):
         self.short_setup({"exit_mode": "partial", "target": "2R"})
         self.tick("2026-10-19 10:15")

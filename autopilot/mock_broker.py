@@ -81,6 +81,9 @@ class H(BaseHTTPRequestHandler):
             if path.startswith("/v2/orders/"):
                 o = S["orders"].get(path.rsplit("/", 1)[1])
                 return self._send(200, _order_view(o)) if o else self._send(404, {"message": "not found"})
+            if path.startswith("/v2/assets/"):
+                a = S.get("assets", {}).get(path.rsplit("/", 1)[1])
+                return self._send(200, a) if a else self._send(404, {"message": "asset not found"})
             if path == "/v2/stocks/snapshots":
                 q = parse_qs(urlparse(self.path).query)
                 want = q.get("symbols", [""])[0].split(",")
