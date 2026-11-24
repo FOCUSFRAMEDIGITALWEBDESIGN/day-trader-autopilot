@@ -15,6 +15,7 @@
 #     the snippet for your existing web server)
 # Update later:  sudo bash deploy/update-server.sh
 set -euo pipefail
+as_user() { local u="$1"; shift; if command -v sudo >/dev/null 2>&1; then sudo -u "$u" "$@"; else runuser -u "$u" -- "$@"; fi; }
 
 PORT=8765
 DOMAIN=""
@@ -31,7 +32,7 @@ done
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
-[ "$(id -u)" = 0 ] || { echo "Bitte mit sudo starten: sudo bash deploy/install-server.sh"; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "Bitte als root starten (oder mit sudo): bash deploy/install-server.sh"; exit 1; }
 [ -f "$APP/autopilot/autopilot.py" ] || { echo "Das Skript muss im Projektordner liegen ($APP)."; exit 1; }
 
 say "1/6 Python prüfen"
@@ -87,7 +88,7 @@ chmod 600 "$APP/.env"
 chown -R "$RUN_USER":"$RUN_USER" "$APP"
 
 if [ ! -f "$APP/trader/autopilot/account.json" ]; then
-  sudo -u "$RUN_USER" "$PY" "$APP/autopilot/autopilot.py" profile 2000 >/dev/null
+  as_user "$RUN_USER" "$PY" "$APP/autopilot/autopilot.py" profile 2000 >/dev/null
   echo "Konto-Profil: \$2.000 (ändern: sudo -u $RUN_USER python3 autopilot/autopilot.py profile BETRAG)"
 fi
 

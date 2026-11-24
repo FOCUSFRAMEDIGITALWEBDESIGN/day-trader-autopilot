@@ -3,9 +3,10 @@
 #   sudo bash deploy/update-server.sh                         # from GitHub (git pull), if installed with git clone
 #   sudo bash deploy/update-server.sh /root/day-trader-autopilot.zip   # from an uploaded zip
 set -euo pipefail
+as_user() { local u="$1"; shift; if command -v sudo >/dev/null 2>&1; then sudo -u "$u" "$@"; else runuser -u "$u" -- "$@"; fi; }
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE=day-trader-autopilot
-[ "$(id -u)" = 0 ] || { echo "Bitte mit sudo starten: sudo bash deploy/update-server.sh"; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "Bitte als root starten (oder mit sudo): bash deploy/update-server.sh"; exit 1; }
 OWNER="$(stat -c %U "$APP")"
 if [ $# -ge 1 ]; then
   ZIP="$1"
@@ -23,7 +24,7 @@ if [ $# -ge 1 ]; then
 else
   [ -d "$APP/.git" ] || { echo "Keine Git-Installation: gib die neue ZIP an, z. B. sudo bash $0 /root/day-trader-autopilot.zip"; exit 1; }
   echo "Neue Version von GitHub holen ..."
-  sudo -u "$OWNER" git -C "$APP" pull --ff-only
+  as_user "$OWNER" git -C "$APP" pull --ff-only
 fi
 systemctl restart "$SERVICE"
 sleep 4
