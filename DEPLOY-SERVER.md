@@ -5,13 +5,32 @@ Läuft neben deinem anderen Bot. Voraussetzung: Linux (Ubuntu/Debian) mit SSH-Zu
 > **Vorher:** Bot auf dem PC beenden (`stop.bat`, und `uninstall-autostart.bat`), und dem Server-Bot ein
 > **eigenes Alpaca-Paper-Konto** geben, falls dein anderer Bot schon Alpaca benutzt.
 
-## 1. Zugang zum privaten GitHub-Repository (einmal)
+## Variante A: ZIP hochladen (ohne GitHub)
+
+1. `day-trader-autopilot.zip` auf den Server laden, z. B. mit **WinSCP** oder **FileZilla** (Protokoll SFTP,
+   Server-IP, dein SSH-Benutzer) in dein Home-Verzeichnis, oder in der Windows-Eingabeaufforderung:
+   `scp day-trader-autopilot.zip BENUTZER@SERVER-IP:~/`
+2. Auf dem Server auspacken und installieren:
+
+```bash
+sudo python3 -m zipfile -e ~/day-trader-autopilot.zip /opt/
+```
+
+```bash
+sudo bash /opt/day-trader-autopilot/deploy/install-server.sh
+```
+
+Update später: neue ZIP hochladen, dann `sudo bash /opt/day-trader-autopilot/deploy/update-server.sh ~/day-trader-autopilot.zip`
+
+## Variante B: von GitHub
+
+### 1. Zugang zum privaten GitHub-Repository (einmal)
 
 GitHub → Profilbild → **Settings → Developer settings → Personal access tokens → Fine-grained tokens →
 Generate new token**: Repository access *Only select repositories* → `day-trader-autopilot`,
 Permissions → *Contents: Read-only*. Den Token kopieren (er ist dein Passwort für `git`).
 
-## 2. Holen und installieren (per SSH auf dem Server)
+### 2. Holen und installieren (per SSH auf dem Server)
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git python3

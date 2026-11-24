@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
-# Pull the newest version from GitHub and restart the service. Your .env and trader/ data stay.
+# Update the server installation and restart the service. Your .env and trader/ data stay.
+#   sudo bash deploy/update-server.sh                         # from GitHub (git pull), if installed with git clone
+#   sudo bash deploy/update-server.sh /root/day-trader-autopilot.zip   # from an uploaded zip
 set -euo pipefail
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE=day-trader-autopilot
 [ "$(id -u)" = 0 ] || { echo "Bitte mit sudo starten: sudo bash deploy/update-server.sh"; exit 1; }
 OWNER="$(stat -c %U "$APP")"
-echo "Neue Version von GitHub holen (bei einem privaten Repository: GitHub-Name und Token eingeben) ..."
-sudo -u "$OWNER" git -C "$APP" pull --ff-only
+if [ $# -ge 1 ]; then
+  ZIP="$1"
+  [ -f "$ZIP" ] || { echo "ZIP nicht gefunden: $ZIP"; exit 1; }
+  TMP="$(mktemp -d)"
+  python3 -m zipfile -e "$ZIP" "$TMP"
+  SRC="$TMP"
+  [ -d "$TMP/day-trader-autopilot" ] && SRC="$TMP/day-trader-autopilot"
+  [ -f "$SRC/autopilot/autopilot.py" ] || { echo "Das ist keine Day-Trader-Autopilot-ZIP."; rm -rf "$TMP"; exit 1; }
+  rm -rf "$SRC/trader" "$SRC/.env"                     # never overwrite your data or keys
+  cp -a "$SRC/." "$APP/"
+  rm -rf "$TMP"
+  chown -R "$OWNER":"$OWNER" "$APP"
+  echo "Dateien aus $ZIP übernommen (.env und trader/ unverändert)."
+else
+  [ -d "$APP/.git" ] || { echo "Keine Git-Installation: gib die neue ZIP an, z. B. sudo bash $0 /root/day-trader-autopilot.zip"; exit 1; }
+  echo "Neue Version von GitHub holen ..."
+  sudo -u "$OWNER" git -C "$APP" pull --ff-only
+fi
 systemctl restart "$SERVICE"
 sleep 4
 systemctl is-active --quiet "$SERVICE" && echo "Aktualisiert und neu gestartet." \
