@@ -56,6 +56,8 @@ tmmod = _mod("ap_tm", TOOLS["tm"])
 import features as fx  # noqa: E402  (shared with the backtest and the learner)
 import shorts  # noqa: E402
 import inplay  # noqa: E402
+import notify  # noqa: E402
+import events  # noqa: E402
 scanmod = _mod("ap_scan", TOOLS["scan"])
 ticketmod = _mod("ap_ticket", TOOLS["ticket"])
 
@@ -91,6 +93,15 @@ DEFAULTS = {
     "tm_hist_min_avg_R": None,
     "stop_after_daily_loss_usd": None,
     "sides": "both",
+    "event_actions": {"fomc": "flat_before", "cpi": "trade", "jobs": "trade"},
+    "event_last_entry": "12:00",
+    "event_flat_by": "13:55",
+    "earnings_action": "skip",
+    "setup_b": {"enabled": True, "or_minutes": 5, "last_entry": "10:30", "entries_from": "09:40",
+                "only_in_play": True},
+    "entry_order": "limit",
+    "entry_limit_buffer_R": 0.1,
+    "entry_limit_timeout_min": 5,
     "in_play": True,
     "in_play_max": 30,
     "in_play_min_gap": 1.0,
@@ -183,6 +194,11 @@ class Pilot:
         with open(os.path.join(AP, "events.jsonl"), "a") as f:
             f.write(json.dumps(rec, default=str) + "\n")
         print("[%s] %-5s %s" % (rec["t"], level, msg), flush=True)
+        if not self.sim and not self.fixed_now:
+            if level == "trade":
+                notify.send(("📈 " if "BUY" in msg or "SHORT" in msg else "🔔 ") + msg)
+            elif level == "error":
+                notify.send("⚠️ Fehler: " + msg, key="err:" + msg[:60])
 
     # ------------------------------------------------------------ tools
     def tool(self, name, *args, now=True, offline=None, timeout=600):
@@ -252,6 +268,8 @@ class Pilot:
             if st.get("opens"):
                 close_m = hm(st["closes"])
                 flat_m = min(hm(self.cfg.get("flat_by", "15:55")), close_m - 5)
+                if (d.get("event") or {}).get("action") == "flat_before":
+                    flat_m = min(flat_m, hm(self.ap.get("event_flat_by", "13:55")))
                 if mins < hm(st["opens"]):
                     phase = "premarket"
                     if mins >= 9 * 60 and not d["premarket_done"]:
@@ -265,12 +283,16 @@ class Pilot:
                         self.flatten_all()
                     else:
                         phase = "trading"
-                        if mins >= hm(st["opens"]) + int(self.ap["or_minutes"]) + 1 and not d.get("in_play_done"):
+                        first_or = min(int(self.ap["or_minutes"]), int(self.setup_b().get("or_minutes", 99)))
+                        if mins >= hm(st["opens"]) + first_or + 1 and not d.get("in_play_done"):
                             self.stocks_in_play(mins - hm(st["opens"]))
                         self.maybe_scan(local, st)
                 else:
                     phase = "after close"
                     self.monitor()
+                    if not d.get("summary_sent"):
+                        d["summary_sent"] = True
+                        self.daily_summary()
         except Exception as e:  # keep the daemon alive; report it
             self.last_error = "%s: %s" % (type(e).__name__, e)
             self.event("error", self.last_error, trace=traceback.format_exc()[-1500:])
@@ -280,6 +302,24 @@ class Pilot:
             self.event("error", "learner could not start: %s" % e)
         self.write_status(st, phase)
         self.save()
+
+    def daily_summary(self):
+        d = self.state
+        closed = [t for t in d.get("trades", []) if t.get("pnl") is not None]
+        acct = d.get("account") or {}
+        lines = ["📊 Tageszusammenfassung %s" % d.get("date")]
+        if closed:
+            for t in closed:
+                lines.append("%s %s %s: %s, $%+.2f (%+.2f R)" % (
+                    "🟢" if t["pnl"] > 0 else "🔴", t["symbol"], "Short" if t.get("side") == "sell" else "Long",
+                    {"target": "Ziel", "stop": "Stop", "trail": "Trailing-Stop", "flat": "Flat 15:55"}.get(t["status"], t["status"]),
+                    t["pnl"], t.get("R") or 0))
+            lines.append("Summe heute: $%+.2f" % d.get("realized", 0))
+        else:
+            lines.append("Heute keine Trades. Kandidaten geprüft: %d." % len(d.get("candidates", {})))
+        if acct.get("equity"):
+            lines.append("Paper-Konto: $%s" % acct["equity"])
+        notify.send("\n".join(lines))
 
     # ------------------------------------------------------------ weekly learning
     def maybe_learn(self, phase, mins):
@@ -379,6 +419,25 @@ class Pilot:
                     self.event("warn", "liquid universe not built yet: %s" % str(e)[:120])
         blocked = {s.upper() for s in self.cfg.get("blocked", [])}
         d["symbols"] = [s for s in syms if s not in blocked]
+        # event day and earnings
+        ev = events.today_event(ROOT, d["date"])
+        d["event"] = dict(ev, action=events.action_for(ev, self.ap)) if ev else None
+        if ev:
+            self.event("info", "event day: %s (%s): %s" % (ev.get("name"), ev.get("type"), {
+                "skip": "no new entries today", "trade": "trading as usual, trades are tagged",
+                "flat_before": "no entries after %s, flat by %s" % (self.ap["event_last_entry"], self.ap["event_flat_by"])}
+                .get(d["event"]["action"], d["event"]["action"])))
+        d["earnings"] = {}
+        try:
+            if self.sim:
+                off = (self.ap.get("sim") or {}).get("earnings")
+                d["earnings"] = events.parse_nasdaq(rj(os.path.join(ROOT, off), {})) if off else {}
+            else:
+                d["earnings"] = events.earnings_today(d["date"])
+            if d["earnings"]:
+                self.event("info", "earnings today: %d companies report (Nasdaq calendar)" % len(d["earnings"]))
+        except Exception as e:
+            self.event("warn", "earnings calendar not available today: %s" % str(e)[:120])
         d["premarket_done"] = True
         self.event("info", "today's scan list: %d symbols" % len(d["symbols"]))
 
@@ -422,9 +481,16 @@ class Pilot:
         if d.get("last_scan_bar") == bar or (sec_into < int(self.ap["scan_delay_seconds"]) and not self.fixed_now):
             return
         d["last_scan_bar"] = bar
-        if mins < 570 + int(self.ap["or_minutes"]) + 5:
-            return  # the range is still forming
-        if mins > hm(self.ap.get("last_entry") or self.cfg.get("no_entries_after", "15:30")):
+        first_or = min(int(self.ap["or_minutes"]), int(self.setup_b().get("or_minutes", 99)))
+        if mins < 570 + first_or + 5:
+            return  # every range is still forming
+        ev = d.get("event") or {}
+        if ev.get("action") == "skip":
+            return
+        if ev.get("action") == "flat_before" and mins > hm(self.ap.get("event_last_entry", "12:00")):
+            return
+        if mins > max(hm(self.ap.get("last_entry") or self.cfg.get("no_entries_after", "15:30")),
+                      hm(self.setup_b().get("last_entry", "00:00")) if self.setup_b() else 0):
             return
         if self.paused():
             return
@@ -434,19 +500,40 @@ class Pilot:
         open_n = sum(1 for t in d["trades"] if t.get("status") in ("open", "pending"))
         if open_n >= int(self.ap["max_open_positions"]):
             return
-        entries = sum(1 for t in d["trades"] if t.get("status") != "rejected")
+        entries = sum(1 for t in d["trades"] if t.get("status") not in ("rejected", "missed"))
         if entries >= int(self.cfg.get("max_trades_per_day", 3)):
             return
         self.scan_and_trade(mins)
 
+    def setup_b(self):
+        """The second setup (5-minute opening range on stocks in play), {} when it is off."""
+        b = self.ap.get("setup_b") or {}
+        return b if b.get("enabled") else {}
+
     def scan_and_trade(self, mins):
         d = self.state
-        if not d["symbols"]:
+        setups = []
+        if mins >= 570 + int(self.ap["or_minutes"]) + 5 and \
+                mins <= hm(self.ap.get("last_entry") or self.cfg.get("no_entries_after", "15:30")):
+            setups.append({"name": "ORB %d min" % int(self.ap["or_minutes"]), "suffix": "",
+                           "or_minutes": int(self.ap["or_minutes"]), "symbols": d["symbols"]})
+        b = self.setup_b()
+        if b:
+            syms = [r["symbol"] for r in d.get("in_play") or []] if b.get("only_in_play", True) else d["symbols"]
+            if syms and 570 + int(b["or_minutes"]) + 5 <= mins <= hm(b.get("last_entry", "10:30")):
+                setups.append({"name": "ORB %d min (in play)" % int(b["or_minutes"]), "suffix": ":B",
+                               "or_minutes": int(b["or_minutes"]), "symbols": syms, "entries_from": b.get("entries_from")})
+        for su in setups:
+            self.scan_setup(mins, su)
+
+    def scan_setup(self, mins, su):
+        d = self.state
+        if not su["symbols"]:
             return
         sides = self.ap.get("sides", "long")
         hits, scanned, note = [], None, None
         if sides in ("long", "both"):
-            args = ["orb", "--symbols", ",".join(d["symbols"]), "--or-minutes", self.ap["or_minutes"],
+            args = ["orb", "--symbols", ",".join(su["symbols"]), "--or-minutes", su["or_minutes"],
                     "--min-price", self.ap["scan_min_price"], "--show", 200]
             code, js, err = self.tool_json("scan", *args, timeout=400)
             if js:
@@ -458,25 +545,26 @@ class Pilot:
             try:
                 local = self.ny()
                 off = (self.ap.get("sim") or {}).get("scan") if self.sim else None
-                sh, n_sc = shorts.scan_breakdowns(scanmod, d["symbols"], local.date(), local.replace(second=0),
-                                                  int(self.ap["or_minutes"]) // 5, float(self.ap["scan_min_price"]),
+                sh, n_sc = shorts.scan_breakdowns(scanmod, su["symbols"], local.date(), local.replace(second=0),
+                                                  su["or_minutes"] // 5, float(self.ap["scan_min_price"]),
                                                   offline=os.path.join(ROOT, off) if off else None)
                 hits += [dict(h, side="sell") for h in sh]
                 scanned = max(scanned or 0, n_sc)
             except Exception as e:
                 note = "short scan: %s" % str(e)[:120]
-        d["scans"].append({"t": self.ny().strftime("%H:%M"), "scanned": scanned, "hits": len(hits),
+        d["scans"].append({"t": self.ny().strftime("%H:%M"), "setup": su["name"], "scanned": scanned, "hits": len(hits),
                            "long": sum(1 for h in hits if h["side"] == "buy"),
                            "short": sum(1 for h in hits if h["side"] == "sell"), "note": note})
         d["scans"] = d["scans"][-100:]
         fresh = []
         for h in hits:
             sym = h["symbol"]
-            key = sym if h["side"] == "buy" else sym + ":short"
+            key = (sym if h["side"] == "buy" else sym + ":short") + su["suffix"]
             if key in d["candidates"]:
                 continue
             age = mins - hm(h["at"])
-            c = {"symbol": sym, "side": h["side"], "first_seen": self.ny().strftime("%H:%M"), "scan": h, "stages": {}}
+            c = {"symbol": sym, "side": h["side"], "first_seen": self.ny().strftime("%H:%M"), "scan": h, "stages": {},
+                 "setup": su["name"], "or_minutes": su["or_minutes"], "entries_from": su.get("entries_from")}
             d["candidates"][key] = c
             self.bump("scanner")
             if age > int(self.ap["max_signal_age_min"]):
@@ -491,11 +579,11 @@ class Pilot:
                 h["pct_over"], "over" if h["side"] == "buy" else "under", h["at"])}
             fresh.append(c)
         if fresh:
-            self.event("info", "scan %s: %d signals, %d fresh: %s" % (self.ny().strftime("%H:%M"), len(hits),
+            self.event("info", "scan %s (%s): %d signals, %d fresh: %s" % (self.ny().strftime("%H:%M"), su["name"], len(hits),
                        len(fresh), ", ".join(c["symbol"] + ("" if c["side"] == "buy" else " (short)") for c in fresh)))
         for c in fresh[: int(self.ap["max_candidates_per_bar"])]:
             open_n = sum(1 for t in d["trades"] if t.get("status") in ("open", "pending"))
-            entries = sum(1 for t in d["trades"] if t.get("status") != "rejected")
+            entries = sum(1 for t in d["trades"] if t.get("status") not in ("rejected", "missed"))
             if open_n >= int(self.ap["max_open_positions"]) or entries >= int(self.cfg.get("max_trades_per_day", 3)):
                 self.reject(c, "limits", "the day's position / trade limit is reached")
                 continue
@@ -536,6 +624,14 @@ class Pilot:
         self.ok(c, "news", "%d items in %sh, none blocking%s" % (
             len(items), self.ap["news_hours"], ("; %+.1f%% vs yesterday" % move["pct"]) if move and
             move.get("pct") is not None else ""))
+        rep = (self.state.get("earnings") or {}).get(sym)
+        if rep:
+            c["earnings"] = rep
+            if self.ap.get("earnings_action", "skip") == "skip":
+                self.reject(c, "news", "earnings today (%s): skipped" % {"pre": "before the open", "after": "after the close"}.get(rep, "time unknown"))
+                return False
+        if self.state.get("event"):
+            c["event"] = self.state["event"].get("name")
         return True
 
     def pipeline(self, c):
@@ -545,7 +641,8 @@ class Pilot:
             return
 
         # 3. entry
-        eargs = ["check", sym, "--write", "--or-minutes", self.ap["or_minutes"]]
+        eargs = ["check", sym, "--write", "--or-minutes", c.get("or_minutes") or self.ap["or_minutes"],
+                 "--config", self.rules_for(c)]
         if self.ap.get("min_volume_x"):
             eargs += ["--min-volume-x", self.ap["min_volume_x"]]
         code, js, err = self.tool_json("entry", *eargs, timeout=120)
@@ -562,7 +659,7 @@ class Pilot:
                 return self.reject(c, "entry", "opened %.2f%% under yesterday's close: gap filter" % gap)
         if self.ap.get("rvol_min") or self.ap.get("market_filter") not in (None, "none") \
                 or self.ap.get("rs_min") is not None:
-            f = self.live_features(sym, int(trig["bar_index"]), int(self.ap["or_minutes"]) // 5)
+            f = self.live_features(sym, int(trig["bar_index"]), int(c.get("or_minutes") or self.ap["or_minutes"]) // 5)
             c["features"] = f
             ok, why = fx.passes(f, self.ap)
             if not ok:
@@ -657,16 +754,23 @@ class Pilot:
             os.remove(os.path.join(T, "orders.json"))
         except OSError:
             pass
-        code, out, err = self.tool("size", "--write", timeout=60)
+        size_args = ["--write"]
+        lim = self.entry_limit(plan, "buy")
+        if lim:
+            size_args += ["--limit", "%.2f" % lim]
+        code, out, err = self.tool("size", *size_args, timeout=60)
         orders = rj(os.path.join(T, "orders.json"), {}) or {}
         if code != 0 or not orders.get("orders") or (orders.get("source", "").find(sym) < 0):
-            return self.reject(c, "budget", "budget refused: %s" % ((err or out).strip().splitlines() or ["?"])[-1])
+            text = (out or "") + "\n" + (err or "")
+            why = next((l.strip() for l in text.splitlines() if l.strip().lower().startswith(("no order", "refused"))), None) \
+                or next((l.strip() for l in reversed(text.splitlines()) if l.strip() and "financial advice" not in l), "?")
+            return self.reject(c, "budget", "budget refused: %s" % why[:200])
         o = orders["orders"][0]
         self.ok(c, "budget", "%s shares, max loss $%.2f" % (o["qty"], o["plan"]["max_loss"]),
                 qty=o["qty"], max_loss=o["plan"]["max_loss"])
 
         # 7. risk
-        code, js, err = self.tool_json("risk", timeout=60)
+        code, js, err = self.tool_json("risk", "--config", self.rules_for(c), timeout=60)
         r = ((js or {}).get("results") or [{}])[0]
         if r.get("verdict") != "PASS":
             return self.reject(c, "risk", "BLOCK: %s" % "; ".join(r.get("reasons") or [str(err)]))
@@ -681,7 +785,7 @@ class Pilot:
         if not self.step_news(c):
             return
         # 3. entry: the breakdown bar from the scan, checked like trader-entry checks a breakout
-        n = int(self.ap["or_minutes"]) // 5
+        n = int(c.get("or_minutes") or self.ap["or_minutes"]) // 5
         if self.ap.get("gap_filter"):
             gap = self.day_open_vs_prev(sym)
             if gap is not None and gap > 0:
@@ -727,21 +831,46 @@ class Pilot:
             return self.reject(c, "budget", "Alpaca cannot short %s (not shortable / hard to borrow)" % sym)
         # 6. budget (mirror of trader-budget)
         pf = rj(os.path.join(T, "portfolio.json"), {}) or {}
-        order, why = shorts.size_short(self.cfg, plan, price=last, cash=pf.get("cash"))
+        order, why = shorts.size_short(self.cfg, plan, price=last, cash=pf.get("cash"),
+                                       limit=self.entry_limit(plan, "sell"))
         if not order:
             return self.reject(c, "budget", "short size refused: " + why)
         wj(os.path.join(T, "orders.json"), shorts.orders_doc(order, self.now_utc()))
         self.ok(c, "budget", "short %s shares, max loss $%.2f" % (order["qty"], order["plan"]["max_loss"]),
                 qty=order["qty"], max_loss=order["plan"]["max_loss"])
         # 7. risk: the pack's own check, with allow_short on for this order only
-        rc = shorts.risk_config(self.cfg, os.path.join(AP, "risk-config-short.json"))
-        code, js, err = self.tool_json("risk", "--config", rc, timeout=60)
+        code, js, err = self.tool_json("risk", "--config", self.rules_for(c), timeout=60)
         r = ((js or {}).get("results") or [{}])[0]
         if r.get("verdict") != "PASS":
             return self.reject(c, "risk", "BLOCK: %s" % "; ".join(r.get("reasons") or [str(err)]))
         self.ok(c, "risk", "PASS: " + " | ".join(r.get("info", [])[:2]), fingerprint=r.get("fingerprint"))
         # 8. broker
         self.place(c, order, plan)
+
+    def rules_for(self, c):
+        """The pack's rules (trader/config.json) as they apply to this candidate: unchanged for a
+        15-minute long; with allow_short on for a short; with the earlier entry window of setup B.
+        Written to trader/autopilot/rules-*.json, the user's config is never changed."""
+        cfg = dict(self.cfg)
+        tag = []
+        if c.get("side") == "sell":
+            cfg["allow_short"] = True
+            tag.append("short")
+        if c.get("entries_from"):
+            cfg["no_entries_before"] = c["entries_from"]
+            tag.append("b")
+        if not tag:
+            return os.path.join(T, "config.json")
+        path = os.path.join(AP, "rules-%s.json" % "-".join(tag))
+        wj(path, cfg)
+        return path
+
+    def entry_limit(self, plan, side):
+        """A limit entry a little past the signal price (entry_limit_buffer_R x risk), or None for market."""
+        if self.ap.get("entry_order", "limit") != "limit":
+            return None
+        buf = float(self.ap.get("entry_limit_buffer_R", 0.1)) * plan["risk_per_share"]
+        return round(plan["entry"] + (buf if side == "buy" else -buf), 2)
 
     def record_fill(self, t, side, qty, price):
         """A fill in the pack's books: trader-broker's ticket.py for longs; for shorts the
@@ -862,7 +991,8 @@ class Pilot:
             self.event("error", "order for %s refused by Alpaca: %s" % (sym, e))
             return
         oid = res.get("id")
-        filled = self.broker.wait_fill(oid, seconds=4 if self.sim else 20) or res
+        is_limit = order.get("type") == "limit"
+        filled = self.broker.wait_fill(oid, seconds=2 if self.sim else (8 if is_limit else 20)) or res
         fq, fp = filled.get("filled_qty"), filled.get("filled_avg_price")
         side = order.get("side", "buy")
         args = ["result", "--index", 1, "--status", "placed", "--broker-id", oid]
@@ -883,6 +1013,12 @@ class Pilot:
                  "fill_price": float(fp) if fp else None,
                  "fill_recorded": bool(fq and float(fq) > 0), "legs": legs, "exit_price": None, "pnl": None}
         trade["date"] = self.state["date"]
+        trade["entry_order"] = order.get("type", "market")
+        trade["setup"] = c.get("setup")
+        trade["event"] = (self.state.get("event") or {}).get("name")
+        trade["earnings"] = c.get("earnings")
+        trade["limit_price"] = float(order["limit_price"]) if order.get("limit_price") else None
+        trade["signal_price"] = plan["entry"]
         trade["in_play"] = sym in {r.get("symbol") for r in self.state.get("in_play") or []}
         trade["stop_log"] = [[trade["at"], plan["stop"]]]
         trade["or"] = (c["stages"].get("entry") or {}).get("opening_range")
@@ -910,6 +1046,17 @@ class Pilot:
                 continue
             if not o:
                 continue
+            if t.get("status") == "pending" and o.get("status") in ("new", "accepted", "pending_new", "partially_filled"):
+                waited = hm(self.ny().strftime("%H:%M")) - hm(t.get("at", "00:00"))
+                if waited >= int(self.ap.get("entry_limit_timeout_min", 5)):
+                    self.broker.cancel(t["order_id"])
+                    o = self.broker.order(t["order_id"]) or o
+                    if float(o.get("filled_qty") or 0) == 0:
+                        t["status"] = "missed"
+                        t["note"] = "limit %.2f not filled within %d min" % (t.get("limit_price") or 0, waited)
+                        self.event("info", "%s: limit entry %.2f not filled in %d min, canceled (missed)" % (
+                            t["symbol"], t.get("limit_price") or 0, waited))
+                        continue
             if o.get("status") in ("canceled", "rejected", "expired") and float(o.get("filled_qty") or 0) == 0:
                 t["status"] = "rejected"
                 t["note"] = "entry %s" % o.get("status")

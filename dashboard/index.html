@@ -396,7 +396,7 @@ function render(s) {
       <span class="c-target" style="width:${100 * tm.p_target}%"></span><span class="c-stop" style="width:${100 * tm.p_stop}%"></span><span class="c-neither" style="width:${100 * tm.p_neither}%"></span></div>
       <div class="why">${pct(tm.p_target)} / ${pct(tm.p_stop)} · Edge ${tm.edge_pts > 0 ? "+" : ""}${tm.edge_pts} Pkt · Ø ${tm.avg_R} R${tm.hist?.triggered ? ` · Historie ${tm.hist.triggered}×: Ø ${tm.hist.avg_R} R` : ""}</div>` : "–";
     const res = c.result === "ORDER PLACED" ? `<b class="up">Order platziert</b>` : `<span class="why">${esc(c.why || c.result || "läuft …")}</span>`;
-    return `<tr><td>${esc(c.first_seen)}</td><td class="sym">${esc(c.symbol)}${c.side === "sell" ? ' <span class="chip no">SHORT</span>' : ""}</td><td><div class="stages">${st}</div></td><td class="why">${plan}</td><td>${odds}</td><td>${res}</td></tr>`;
+    return `<tr><td>${esc(c.first_seen)}</td><td class="sym">${esc(c.symbol)}${c.side === "sell" ? ' <span class="chip no">SHORT</span>' : ""}${(c.or_minutes || 15) === 5 ? ' <span class="chip">5-Min</span>' : ""}${c.earnings ? ' <span class="chip">Zahlen</span>' : ""}</td><td><div class="stages">${st}</div></td><td class="why">${plan}</td><td>${odds}</td><td>${res}</td></tr>`;
   }).join("") : `<tr><td colspan="6" class="empty">Noch keine Ausbrüche heute.</td></tr>`;
 
   // trades (all days)
@@ -507,6 +507,7 @@ async function loadStats() {
   $("statkpis").innerHTML = o.n ? [
     k("Geschlossene Trades", o.n, `${(st.days || []).length} Handelstage`),
     k("Trefferquote", o.win_pct + " %", `Ø Gewinn ${usd(o.avg_win)} · Ø Verlust ${usd(o.avg_loss)}`),
+    k("Einstieg", o.slippage_R == null ? "–" : `${o.slippage_R > 0 ? "+" : ""}${o.slippage_R} R`, `Slippage gegen Signal · ${o.missed_entries || 0} Limit-Orders verpasst`),
     k("Ø pro Trade", `<span class="${cls(o.avg_R)}">${o.avg_R > 0 ? "+" : ""}${o.avg_R} R</span>`, `${usd(o.per_trade, true)} pro Trade`),
     k("Summe", `<span class="${cls(o.pnl)}">${usd(o.pnl, true)}</span>`, `Profit-Faktor ${o.profit_factor ?? "–"} · max. Rückgang ${usd(o.max_drawdown)}`),
     k("Live vs. Backtest", st.vs_backtest == null ? "–" : `<span class="${cls(st.vs_backtest)}">${st.vs_backtest > 0 ? "+" : ""}${st.vs_backtest} R</span>`,

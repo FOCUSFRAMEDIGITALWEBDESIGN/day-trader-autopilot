@@ -225,6 +225,12 @@ def exit_label(s):
             "trail_atr": "Trailing %g× ATR, ohne Ziel" % float(s.get("exit_atr_k", 2))}.get(m, m)
 
 
+def in_play_rows(rows):
+    """Rows of stocks that were in play that morning: a gap of at least 1 %% either way and at
+    least 1.5x the usual opening volume (the live in-play scan's thresholds)."""
+    return [r for r in rows if abs(r["gap"]) >= 1.0 and (r["rvol"] or 0) >= 1.5]
+
+
 def describe(s, edge=None):
     bits = ["OR%s" % s["or_minutes"], s["stop"], "TM-Ziel " + s["target"] if s.get("exit_mode") in fx.TRAILING
             else s["target"], "bis " + s["last_entry"],

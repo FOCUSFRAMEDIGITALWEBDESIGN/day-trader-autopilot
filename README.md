@@ -84,6 +84,22 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Zuverlässig auf dem PC, Telegram, Einstieg, Ereignisse, zweites Setup
+
+- **Wächter:** `start.bat` startet einen Wächter, der Bot und Dashboard nach Abstürzen neu startet, nur eine Kopie
+  zulässt und Windows während der US-Handelszeit (9:00–16:15 New York) **wach hält** (der Bildschirm darf aus).
+- **Autostart:** `install-autostart.bat` (einmal) startet den Bot bei jeder Windows-Anmeldung, `uninstall-autostart.bat` entfernt das.
+- **Telegram:** `telegram-setup.bat` verbindet deinen Telegram-Bot (Token von @BotFather). Dann kommen Nachrichten zu
+  jedem Trade, jedem Ausstieg, Fehlern, Neustarts, dem wöchentlichen Lernen und eine Tageszusammenfassung.
+- **Limit-Einstieg:** statt Market-Order eine Limit-Order knapp über dem Signal (`entry_limit_buffer_R`, 0,1 R);
+  nach `entry_limit_timeout_min` (5) Minuten ohne Ausführung wird sie storniert („verpasst“). Die Statistik zeigt
+  Slippage und verpasste Einstiege.
+- **Ereignistage:** `config/events.json` (Fed-Zinsentscheide, US-Inflationsdaten; Quellen in der Datei). Am Fed-Tag
+  keine Einstiege nach 12:00 und flat um 13:55 (`event_actions`). Aktien mit Quartalszahlen am selben Tag werden
+  ausgelassen (Nasdaq-Kalender, `earnings_action`).
+- **Setup B:** 5-Minuten-Opening-Range nur auf den Stocks in Play, Einstiege 9:40–10:30 (`setup_b`). Das Lernmodul
+  bewertet es jede Woche getrennt und schaltet es bei klarer Datenlage ein oder aus.
+
 ## Long und Short, Stocks in Play
 
 - **Short-Seite:** Der Bot handelt auch Ausbrüche nach **unten** (Schlusskurs unter dem Opening-Range-Tief),

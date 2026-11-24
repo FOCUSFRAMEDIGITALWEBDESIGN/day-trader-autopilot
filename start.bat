@@ -1,5 +1,5 @@
 @echo off
-rem Day Trader Autopilot fuer Windows: startet Autopilot (nur Paper) und Dashboard
+rem Day Trader Autopilot fuer Windows: startet Autopilot (nur Paper) und Dashboard unter einem Waechter
 cd /d "%~dp0"
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
@@ -22,15 +22,12 @@ if not exist .env (
   exit /b 0
 )
 
-if not exist trader mkdir trader
-if not exist trader\autopilot mkdir trader\autopilot
-if not exist trader\config.json copy config\config.json trader\config.json >nul
-if not exist trader\autopilot.json copy config\autopilot.json trader\autopilot.json >nul
-
-start "DTA-Autopilot" /min cmd /c "python autopilot\autopilot.py run >> trader\autopilot\autopilot.log 2>&1"
-start "DTA-Dashboard" /min cmd /c "python dashboard\server.py >> trader\autopilot\dashboard.log 2>&1"
-timeout /t 4 >nul
+call "%~dp0start-silent.bat"
+timeout /t 5 >nul
 start "" http://127.0.0.1:8765
-echo Autopilot und Dashboard laufen (zwei minimierte Fenster). Beenden mit stop.bat.
-echo Logs: trader\autopilot\autopilot.log
+echo.
+echo Der Autopilot laeuft im Hintergrund (minimiertes Fenster "DTA-Autopilot").
+echo Er startet sich nach Abstuerzen selbst neu und haelt Windows waehrend der US-Handelszeit wach.
+echo Dashboard: http://127.0.0.1:8765     Beenden: stop.bat
+echo Logs: trader\autopilot\autopilot.log und trader\autopilot\run_all.log
 pause

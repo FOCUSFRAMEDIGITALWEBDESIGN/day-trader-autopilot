@@ -29,6 +29,27 @@ def _pos_fill(sym, side, qty, price):
         S["positions"].pop(sym, None)
 
 
+def _try_fill(o):
+    """A market entry fills at once; a limit entry only when the price is at or through its limit."""
+    b, sym, side = o["_b"], o["symbol"], o["side"]
+    px = S["prices"].get(sym)
+    if o["type"] == "limit":
+        lim = float(b["limit_price"])
+        if px is None or (px > lim if side == "buy" else px < lim):
+            return False
+    o.update(status="filled", filled_qty=b["qty"], filled_avg_price=str(px))
+    _pos_fill(sym, side, float(b["qty"]), px)
+    if b.get("order_class") == "bracket":
+        for typ, price in (("limit", b["take_profit"]["limit_price"]), ("stop", b["stop_loss"]["stop_price"])):
+            lid = str(uuid.uuid4())
+            S["orders"][lid] = {"id": lid, "parent": o["id"], "symbol": sym, "side": "sell" if side == "buy" else "buy",
+                                "qty": b["qty"], "type": typ, "status": "new" if typ == "limit" else "held",
+                                "limit_price" if typ == "limit" else "stop_price": price,
+                                "filled_qty": "0", "filled_avg_price": None}
+            o["leg_ids"].append(lid)
+    return True
+
+
 def _cancel_family(o):
     """OCO semantics: when one exit of a pair fills or is canceled, the other is canceled."""
     root = o.get("parent") or o["id"]
@@ -42,6 +63,7 @@ def _order_view(o):
     v = dict(o)
     v["legs"] = [S["orders"][i] for i in o.get("leg_ids", [])]
     v.pop("leg_ids", None)
+    v.pop("_b", None)
     return v
 
 
@@ -142,22 +164,13 @@ class H(BaseHTTPRequestHandler):
                          "filled_avg_price": None, "leg_ids": [lid]}
                     S["orders"][oid] = o
                     return self._send(200, _order_view(o))
-                px = S["prices"].get(sym)
                 oid = str(uuid.uuid4())
                 o = {"id": oid, "client_order_id": b.get("client_order_id"), "symbol": sym, "side": side, "qty": b["qty"],
-                     "type": b.get("type"), "order_class": b.get("order_class", "simple"), "status": "filled",
-                     "filled_qty": b["qty"], "filled_avg_price": str(px), "leg_ids": []}
-                _pos_fill(sym, side, qty, px)
-                if b.get("order_class") == "bracket":
-                    for typ, price in (("limit", b["take_profit"]["limit_price"]), ("stop", b["stop_loss"]["stop_price"])):
-                        lid = str(uuid.uuid4())
-                        S["orders"][lid] = {"id": lid, "parent": oid, "symbol": sym, "side": "sell" if side == "buy" else "buy",
-                                            "qty": b["qty"],
-                                            "type": typ, "status": "new" if typ == "limit" else "held",
-                                            "limit_price" if typ == "limit" else "stop_price": price,
-                                            "filled_qty": "0", "filled_avg_price": None}
-                        o["leg_ids"].append(lid)
+                     "type": b.get("type"), "order_class": b.get("order_class", "simple"), "status": "new",
+                     "filled_qty": "0", "filled_avg_price": None, "leg_ids": [], "_b": b,
+                     "limit_price": b.get("limit_price")}
                 S["orders"][oid] = o
+                _try_fill(o)
                 return self._send(200, _order_view(o))
             if path == "/mock/fill_leg":
                 for o in S["orders"].values():
@@ -171,6 +184,9 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"message": "no open leg"})
             if path == "/mock/price":
                 S["prices"].update({k: float(v) for k, v in b.items()})
+                for o in list(S["orders"].values()):
+                    if o.get("_b") and o["status"] == "new":
+                        _try_fill(o)
                 return self._send(200, S["prices"])
         self._send(404, {"message": "unknown"})
 

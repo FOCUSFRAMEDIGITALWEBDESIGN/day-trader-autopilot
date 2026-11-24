@@ -36,6 +36,7 @@ def load(ap_dir):
     if today.get("date") and today["date"] not in seen_days:
         _absorb(today, trades, cands)
     closed = [t for t in trades if t.get("pnl") is not None and t.get("status") not in ("rejected", "open", "pending")]
+    load.missed = [t for t in trades if t.get("status") == "missed"]
     return closed, cands, rj(os.path.join(ap_dir, "learning.json"), []) or []
 
 
@@ -108,6 +109,9 @@ GROUPS = [
     ("Ausstiegsart", lambda t: EXIT_NAMES.get(t.get("exit_mode") or "fixed", t.get("exit_mode"))),
     ("Wie beendet", lambda t: HOW_NAMES.get(t.get("status"), t.get("status"))),
     ("Stock in play", lambda t: "ja" if t.get("in_play") else "nein"),
+    ("Setup", lambda t: t.get("setup") or "ORB 15 min"),
+    ("Einstiegsorder", lambda t: "Limit" if t.get("entry_order") == "limit" else "Market"),
+    ("Ereignistag", lambda t: t.get("event") or "normaler Tag"),
     ("Relatives Volumen", lambda t: _bucket((t.get("features") or {}).get("rvol"), [1.5, 2.5], ["unter 1,5×", "1,5–2,5×", "über 2,5×"])),
     ("Markt (SPY) beim Einstieg", lambda t: _bucket((t.get("features") or {}).get("spy_change"), [0], ["SPY im Minus", "SPY im Plus"])),
     ("Stärke gegenüber SPY", lambda t: _bucket((t.get("features") or {}).get("rs"), [0], ["schwächer (für die Richtung)", "stärker (für die Richtung)"])),
@@ -180,6 +184,11 @@ def report(ap_dir):
     for t in trades:
         eq += t["pnl"]
         equity.append({"date": t.get("date"), "at": t.get("at"), "symbol": t.get("symbol"), "cum": round(eq, 2)})
+    missed = getattr(load, "missed", [])
+    s["missed_entries"] = len(missed)
+    slips = [(t["fill_price"] - t["signal_price"]) / t["plan"]["risk_per_share"] * (1 if t.get("side", "buy") == "buy" else -1)
+             for t in trades if t.get("fill_price") and t.get("signal_price") and (t.get("plan") or {}).get("risk_per_share")]
+    s["slippage_R"] = round(statistics.mean(slips), 3) if slips else None
     return {"overall": s, "groups": grouped(trades), "funnel": funnel(cands), "equity": equity,
             "days": sorted({t.get("date") for t in trades}),
             "backtest_expectation_R": exp,

@@ -1,0 +1,24 @@
+{
+  "_note": "Market-wide event days (New York dates). Sources, read 2026-11-24: FOMC from federalreserve.gov/monetarypolicy/fomccalendars.htm and the Fed press release of 2026-11-12 (revised 2027 schedule; the decision is on the 2nd meeting day, 2:00 PM ET; Oct 26-27, 2027 has no policy decision). CPI from the BLS release schedule (8:30 AM ET). Sep and Oct 2027 CPI dates were not confirmed and are left out; add them (and jobs-report days, type 'jobs') from bls.gov/schedule when known. Actions per type are in trader/autopilot.json -> event_actions.",
+  "events": [
+    {"date": "2026-12-09", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-01-27", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-03-17", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-04-28", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-06-09", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-07-28", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-09-15", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2027-11-17", "type": "fomc", "name": "Fed-Zinsentscheid"},
+    {"date": "2026-12-10", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-01-13", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-02-11", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-03-10", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-04-13", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-05-12", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-06-10", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-07-14", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-08-11", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-11-10", "type": "cpi", "name": "US-Inflationsdaten (CPI)"},
+    {"date": "2027-12-10", "type": "cpi", "name": "US-Inflationsdaten (CPI)"}
+  ]
+}

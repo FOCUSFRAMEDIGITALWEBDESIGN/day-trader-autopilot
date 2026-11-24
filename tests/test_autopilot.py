@@ -72,7 +72,7 @@ class AutopilotReel(unittest.TestCase):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def autopilot(self, ap):
-        json.dump(dict(ap, sim=SIM, symbols=["TSLA"], premarket_scan=False),
+        json.dump(dict({"entry_order": "market"}, **dict(ap, sim=SIM, symbols=["TSLA"], premarket_scan=False)),
                   open(os.path.join(self.d, "trader", "autopilot.json"), "w"))
 
     def tick(self, now):
@@ -208,7 +208,7 @@ class AutopilotReel(unittest.TestCase):
         reflect(os.path.join(fx, "trader-entry", "TSLA-2026-10-19-5m.json"), os.path.join(self.d, "refl", "TSLA.json"))
         reflect(os.path.join(fx, "trader-timemachine", "TSLA-60d5m.json.gz"), os.path.join(self.d, "refl", "TSLA-60d.json.gz"))
         sim = dict(SIM, scan="refl/TSLA.json", entry="refl/TSLA.json", tm="refl/TSLA-60d.json.gz")
-        ap = dict({"sides": "short", "target": "1R", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99,
+        ap = dict({"entry_order": "market", "sides": "short", "target": "1R", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99,
                    "tm_min_avg_R": -9, "tm_replays": 2000, "gap_filter": False}, **extra)
         json.dump(dict(ap, sim=sim, symbols=["TSLA"], premarket_scan=False),
                   open(os.path.join(self.d, "trader", "autopilot.json"), "w"))
@@ -280,6 +280,106 @@ class AutopilotReel(unittest.TestCase):
         self.assertEqual(st["day"]["symbols"], ["TSLA", "NVDA"])
         self.assertEqual(st["day"]["in_play"][0]["symbol"], "NVDA")
         self.assertIn("stocks in play: 1 found", out)
+
+    def test_limit_entry_fills_or_is_missed(self):
+        self.autopilot({"target": "2R", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99, "tm_min_avg_R": -9,
+                        "tm_replays": 2000, "entry_order": "limit", "entry_limit_buffer_R": 0.1,
+                        "entry_limit_timeout_min": 5})
+        post("/mock/price", {"TSLA": 365.10})          # above the limit 364.18 + 0.586 = 364.77: no fill yet
+        st, out = self.tick("2026-10-19 10:15")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["status"], t["entry_order"], t["limit_price"]), ("pending", "limit", 364.77))
+        o = mock_broker.S["orders"][t["order_id"]]
+        self.assertEqual(o["qty"], "7")                  # sized from the limit: 50 / (364.77 - 358.32) = 7
+        st, out = self.tick("2026-10-19 10:21")         # 6 minutes, still not filled: canceled
+        t = st["day"]["trades"][0]
+        self.assertEqual(t["status"], "missed")
+        self.assertEqual(mock_broker.S["orders"][t["order_id"]]["status"], "canceled")
+        self.assertEqual(mock_broker.S["positions"], {})
+
+    def test_limit_entry_fills_when_price_comes_back(self):
+        self.autopilot({"target": "2R", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99, "tm_min_avg_R": -9,
+                        "tm_replays": 2000, "entry_order": "limit"})
+        post("/mock/price", {"TSLA": 365.10})
+        self.tick("2026-10-19 10:15")
+        post("/mock/price", {"TSLA": 364.60})          # back under the limit: filled at 364.60
+        st, out = self.tick("2026-10-19 10:17")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["status"], t["fill_price"], t["qty"]), ("open", 364.60, 7.0))
+
+    def test_limit_with_1R_target_is_blocked_with_the_reason(self):
+        # a limit above the signal makes reward:risk < 1 at a 1R target: trader-budget refuses, and says why
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000, "entry_order": "limit"})
+        st, out = self.tick("2026-10-19 10:15")
+        c = st["day"]["candidates"][0]
+        self.assertIn("reward:risk 0.82", c["why"])
+        self.assertEqual(st["day"]["trades"], [])
+
+    def event_day(self, typ):
+        json.dump({"events": [{"date": "2026-10-19", "type": typ, "name": "Test-Ereignis"}]},
+                  open(os.path.join(self.d, "trader", "events.json"), "w"))
+
+    def test_fed_day_is_flat_before_the_decision(self):
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000})
+        self.event_day("fomc")
+        st, out = self.tick("2026-10-19 10:15")
+        self.assertIn("flat by 13:55", out)
+        t = st["day"]["trades"][0]
+        self.assertEqual(t["event"], "Test-Ereignis")
+        post("/mock/price", {"TSLA": 366.00})
+        st, out = self.tick("2026-10-19 13:55")             # not 15:55: before the 2 PM decision
+        self.assertEqual(st["day"]["trades"][0]["status"], "flat")
+        self.assertEqual(st["phase"], "flatten")
+
+    def test_skip_day_and_earnings(self):
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000,
+                        "event_actions": {"cpi": "skip"}})
+        self.event_day("cpi")
+        st, out = self.tick("2026-10-19 10:15")
+        self.assertEqual(st["day"]["candidates"], [])           # no scan at all on a skip day
+        self.assertIn("no new entries today", out)
+
+    def test_earnings_day_is_skipped(self):
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000})
+        ap = json.load(open(os.path.join(self.d, "trader", "autopilot.json")))
+        ap["sim"]["earnings"] = "earn.json"
+        json.dump(ap, open(os.path.join(self.d, "trader", "autopilot.json"), "w"))
+        json.dump({"data": {"rows": [{"symbol": "TSLA", "time": "time-after-hours"},
+                                     {"symbol": "KO", "time": "time-pre-market"}]}},
+                  open(os.path.join(self.d, "earn.json"), "w"))
+        st, out = self.tick("2026-10-19 10:15")
+        c = st["day"]["candidates"][0]
+        self.assertFalse(c["stages"]["news"]["ok"])
+        self.assertIn("earnings today (after the close)", c["why"])
+        self.assertEqual(st["day"]["trades"], [])
+
+    def test_setup_b_five_minute_range_on_stocks_in_play(self):
+        import datetime
+        # setup A is over at 10:00; only setup B (5-minute range, in-play stocks, entries until 10:30) can trade
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99, "tm_min_avg_R": -9,
+                        "tm_replays": 2000, "last_entry": "10:00", "sim_in_play": True,
+                        "setup_b": {"enabled": True, "or_minutes": 5, "last_entry": "10:30", "entries_from": "09:40",
+                                    "only_in_play": True}})
+        os.makedirs(os.path.join(self.d, "trader", "autopilot"), exist_ok=True)
+        json.dump({"built": datetime.date.today().isoformat(), "symbols": [{"symbol": "TSLA"}]},
+                  open(os.path.join(self.d, "trader", "autopilot", "liquid.json"), "w"))
+        mock_broker.S["snapshots"] = {"TSLA": {"dailyBar": {"o": 360.5, "c": 359, "v": 6e6},
+                                               "prevDailyBar": {"c": 354.72, "v": 9e7}}}
+        try:
+            self.tick("2026-10-19 09:36")                   # in play is ranked after the 5-minute range
+            st, out = self.tick("2026-10-19 10:15")
+        finally:
+            mock_broker.S.pop("snapshots", None)
+        self.assertEqual(st["day"]["in_play"][0]["symbol"], "TSLA")
+        c = st["day"]["candidates"][0]
+        self.assertEqual((c["setup"], c["or_minutes"]), ("ORB 5 min (in play)", 5))
+        self.assertEqual(c["result"], "ORDER PLACED", c["stages"])
+        t = st["day"]["trades"][0]
+        self.assertEqual(t["setup"], "ORB 5 min (in play)")
+        rules = json.load(open(os.path.join(self.d, "trader", "autopilot", "rules-b.json")))
+        self.assertEqual(rules["no_entries_before"], "09:40")
+        cfg = json.load(open(os.path.join(self.d, "trader", "config.json")))
+        self.assertEqual(cfg["no_entries_before"], "09:45")    # the user's rules are unchanged
 
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")

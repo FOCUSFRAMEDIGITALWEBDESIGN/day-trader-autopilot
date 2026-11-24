@@ -100,5 +100,23 @@
  "in_play_min_gap": 1.0,
  "in_play_min_rvol": 1.5,
  "in_play_min_price": 10,
- "in_play_universe": 1500
+ "in_play_universe": 1500,
+ "setup_b": {
+  "enabled": true,
+  "or_minutes": 5,
+  "last_entry": "10:30",
+  "entries_from": "09:40",
+  "only_in_play": true
+ },
+ "entry_order": "limit",
+ "entry_limit_buffer_R": 0.1,
+ "entry_limit_timeout_min": 5,
+ "event_actions": {
+  "fomc": "flat_before",
+  "cpi": "trade",
+  "jobs": "trade"
+ },
+ "event_last_entry": "12:00",
+ "event_flat_by": "13:55",
+ "earnings_action": "skip"
 }

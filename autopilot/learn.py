@@ -243,6 +243,31 @@ def main(argv=None):
               "Vorsprung zu klein (%.3f R, nötig %.3f)" % (best["lcb"] - (cur_r.get("lcb") or 0), MIN_GAIN_R)
         log("Plan bleibt: %s" % why)
         record["result"] = "behalten: " + why
+    # setup B: the 5-minute range on stocks in play, judged on its own with the current exits
+    try:
+        b_cfg = (rj(ap_path) or cfg).get("setup_b") or {"enabled": True, "or_minutes": 5, "last_entry": "10:30"}
+        b_rows = rsch.in_play_rows(rsch.build_rows(data, int(b_cfg.get("or_minutes", 5)), b_cfg.get("last_entry", "10:30")))
+        b_set = dict(cur if not switch else best["settings"], or_minutes=int(b_cfg.get("or_minutes", 5)),
+                     last_entry=b_cfg.get("last_entry", "10:30"), max_pct_over=0, gap_filter=False, rvol_min=0)
+        b_edge = cur_edge if not switch else best["edge"]
+        b_res = summary(rsch.gated(data, b_rows, b_set, recent, [b_edge], 400 if big else REPLAYS)[b_edge])
+        record["setup_b"] = dict(b_res, enabled_before=bool(b_cfg.get("enabled", True)))
+        log("Setup B (5-Min-Range, Stocks in Play): n=%s, Ø %s R" % (b_res["n"], b_res["mean"]))
+        want = None
+        if b_res["n"] >= min_trades and b_res["mean"] is not None:
+            if b_cfg.get("enabled", True) and b_res["mean"] < 0:
+                want = False
+            elif not b_cfg.get("enabled", True) and b_res["lcb"] > 0:
+                want = True
+        if want is not None:
+            record["setup_b"]["enabled_after"] = want
+            log("Setup B wird %s" % ("eingeschaltet" if want else "ausgeschaltet"))
+            if not a.dry_run:
+                new = rj(ap_path) or dict(cfg)
+                new["setup_b"] = dict(b_cfg, enabled=want)
+                wj(ap_path, new)
+    except Exception as e:
+        log("Setup B nicht bewertet: %s" % str(e)[:120])
     record["seconds"] = round(time.time() - t0)
     record["log"] = lines
     return finish(record, a)
@@ -250,6 +275,11 @@ def main(argv=None):
 
 def finish(record, a):
     if not a.dry_run:
+        try:
+            import notify
+            notify.send("🧠 Wöchentliches Lernen: %s" % record.get("result", ""))
+        except Exception:
+            pass
         hist = rj(os.path.join(AP, "learning.json"), []) or []
         hist.append(record)
         wj(os.path.join(AP, "learning.json"), hist[-60:])

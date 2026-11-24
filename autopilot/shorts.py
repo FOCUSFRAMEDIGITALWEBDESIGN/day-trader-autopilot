@@ -95,14 +95,14 @@ def plan_short(sym, date, entry, entry_time, entry_bar, or_high, or_low, stop_ru
 
 
 # ---------------------------------------------------------------- 3. size (mirror of trader-budget)
-def size_short(cfg, plan, price=None, cash=None):
+def size_short(cfg, plan, price=None, cash=None, limit=None):
     """Whole shares, the smallest of trader-budget's four limits. A LOWER fresh price means a
-    bigger risk for a short, so the entry it sizes at is the lower of the plan's and the price.
-    Returns (order, refusal)."""
+    bigger risk for a short, so the entry it sizes at is the lower of the plan's and the price;
+    with a limit order, the limit price (like trader-budget does for a long). Returns (order, refusal)."""
     sym = plan["symbol"]
     if sym in {s.upper() for s in cfg.get("blocked", [])}:
         return None, "%s is on the blocked list" % sym
-    entry = min(plan["entry"], price) if price else plan["entry"]
+    entry = limit if limit else (min(plan["entry"], price) if price else plan["entry"])
     stop, target = plan["stop"], plan["target"]
     risk = stop - entry
     if risk <= 0 or target >= entry:
@@ -127,14 +127,17 @@ def size_short(cfg, plan, price=None, cash=None):
     if qty * entry < float(cfg.get("min_order_usd", 5)):
         return None, "the order is under the minimum"
     loss = round(qty * risk, 2)
-    return {"symbol": sym, "side": "sell", "qty": str(qty), "type": "market", "time_in_force": "day",
+    o = {"symbol": sym, "side": "sell", "qty": str(qty), "type": "limit" if limit else "market", "time_in_force": "day",
             "order_class": "bracket", "take_profit_limit_price": "%.2f" % target,
             "stop_loss_stop_price": "%.2f" % stop,
             "why": "opening-range breakdown on %s: short %d shares, bound by your %s (%d x %.2f = $%.2f at the stop)"
                    % (sym, qty, decided, qty, risk, loss),
             "plan": {"entry": round(entry, 2), "stop": stop, "target": target, "risk_per_share": round(risk, 2),
                      "max_loss": loss, "setup": "orb-short", "entry_time": plan.get("entry_time"),
-                     "flat_by": plan.get("flat_by")}}, None
+                     "flat_by": plan.get("flat_by")}}
+    if limit:
+        o["limit_price"] = "%.2f" % limit
+    return o, None
 
 
 def orders_doc(order, now_utc, paper=True, note="Short entry by the autopilot."):
