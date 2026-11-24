@@ -47,6 +47,7 @@ class AlpacaHistory(unittest.TestCase):
             self.assertEqual(ours[-1][1][10]["c"], theirs[-1][1][10]["c"])
         finally:
             srv.shutdown()
+            srv.server_close()
             mock_broker.S.pop("deny_sip", None)
             shutil.rmtree(d, ignore_errors=True)
 

@@ -79,6 +79,28 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Long und Short, Stocks in Play
+
+- **Short-Seite:** Der Bot handelt auch Ausbrüche nach **unten** (Schlusskurs unter dem Opening-Range-Tief),
+  gespiegelt mit denselben Regeln: Stop über dem Einstieg, Time Machine (Seite „sell“), trader-risk mit
+  `allow_short` nur für diese Orders (deine `config.json` bleibt unverändert), Rückkauf spätestens 15:55.
+  Einstellung `sides`: `"long"`, `"short"` oder `"both"` (Standard). Die Richtung ändert das Lernmodul nur
+  auf Basis von Jahresdaten.
+- **Stocks in Play:** Um 9:46 New York ordnet der Bot ~1.500 liquide US-Aktien (wöchentlich aus Alpaca-Tagesdaten
+  bestimmt) nach Kurslücke und relativem Volumen und nimmt die stärksten 30 in die Scanliste
+  (`in_play_*` in `trader/autopilot.json`).
+
+## Statistik und Wochen-Export
+
+Der Abschnitt **Statistik** im Dashboard zeigt alle geschlossenen Paper-Trades nach Richtung, Uhrzeit,
+Ausstiegsart, Stocks in Play, relativem Volumen, Markt, Stärke, Time-Machine-Edge, Wochentag, Plan-Version
+und Aktie, dazu wo die Kandidaten hängen blieben und Live gegen Backtest.
+
+**Export für die Auswertung:** Doppelklick auf `export.bat` (oder der Knopf im Dashboard). Es entsteht
+`trader/export/autopilot-export-DATUM.zip` – ohne Alpaca-Schlüssel und ohne persönliche Daten. Ausgewertet
+wird sie mit `python tuning/analyze_export.py DATEI.zip`: echte Trades plus Gegenprobe, was die
+abgelehnten Kandidaten auf den echten Kerzen gemacht hätten.
+
 ## Trade-Fenster (Charts wie bei TradingView)
 
 Für jeden offenen Trade erscheint im Dashboard ein eigenes Chart-Fenster, live aktualisiert: Kerzen

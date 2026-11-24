@@ -26,7 +26,7 @@ STOPS = ["or-mid", "or-low"]
 TARGETS = ["1.5R", "2R", "3R"]
 EXITS = ["fixed", "breakeven", "partial", "trail_r", "trail_atr:1.5", "trail_atr:3"]
 ROWSETS = {"or_minutes": [15, 30], "last_entry": ["10:30", "11:30", "12:30"]}
-FILTERS = {"max_pct_over": [0.75, 0], "gap_filter": [True, False], "rvol_min": [0, 1.5, 2.5],
+FILTERS = {"sides": ["long", "short", "both"], "max_pct_over": [0.75, 0], "gap_filter": [True, False], "rvol_min": [0, 1.5, 2.5],
            "market_filter": ["none", "green"], "rs_min": [None, 0.0]}
 
 
@@ -64,6 +64,9 @@ def load(symbols=None):
 
 # ---------------------------------------------------------------- rows
 def build_rows(data, or_minutes, last_entry):
+    """Rows for both sides. A short row is built on the mirrored price (features.mirror), so
+    the long rules apply unchanged; its features are oriented for a short (gap down, SPY red,
+    weaker than SPY), and entry / stop / target are stored as real prices for the Time Machine."""
     n = or_minutes // 5
     last_slot = (hm(last_entry) - 570) // 5 - 1
     spy = {d: D for d, D in data.get("SPY", [])}
@@ -72,47 +75,59 @@ def build_rows(data, or_minutes, last_entry):
         if sym == "SPY":
             continue
         for idx in range(1, len(S)):
-            d, D = S[idx]
-            oh, ol = tm.opening_range(D, n)
-            k = next((i for i in range(n, last_slot + 1) if D[i]["c"] > oh), None)
-            if k is None or k + 1 > FLAT:
-                continue
-            sig = round(D[k]["c"], 2)
-            fill = D[k + 1]["o"]
+            d, Dreal = S[idx]
             prev_c = S[idx - 1][1][-1]["c"]
             past = [P for _, P in S[max(0, idx - 14):idx]]
             sp = spy.get(d)
-            row = {"sym": sym, "date": d, "idx": idx, "k": k, "entry": sig, "fill": fill,
-                   "pct_over": (sig - oh) / oh * 100, "gap": (D[0]["o"] - prev_c) / prev_c * 100,
-                   "rvol": fx.rvol(D, past, n), "market_ok": fx.market_ok(sp, k, "green"),
-                   "rs": fx.rel_strength(D, sp, k), "R": {}, "plan": {}}
-            after = D[k + 1:FLAT + 1]
-            a14 = fx.atr(D[:k + 1])
-            for st in STOPS:
-                stop = tm.cents_away((oh + ol) / 2 if st == "or-mid" else ol, True)
-                risk = sig - stop
-                if risk <= 0 or not (0.15 <= risk / sig * 100 <= 2.5):
+            for side in ("buy", "sell"):
+                D = Dreal if side == "buy" else fx.mirror(Dreal)
+                oh, ol = tm.opening_range(D, n)
+                k = next((i for i in range(n, last_slot + 1) if D[i]["c"] > oh), None)
+                if k is None or k + 1 > FLAT:
                     continue
-                for tg in TARGETS:
-                    target = round(sig + float(tg[:-1]) * risk, 2)
-                    if fill <= stop or fill >= target:
+                sig = round(D[k]["c"], 2)
+                fill = D[k + 1]["o"]
+                gap = (Dreal[0]["o"] - prev_c) / prev_c * 100
+                if side == "buy":
+                    feats = {"rvol": fx.rvol(Dreal, past, n), "market_ok": fx.market_ok(sp, k, "green"),
+                             "rs": fx.rel_strength(Dreal, sp, k)}
+                else:
+                    feats = fx.short_features(Dreal, sp, k, n, past)
+                    gap = -gap
+                row = {"sym": sym, "date": d, "idx": idx, "k": k, "side": side, "entry": sig, "fill": fill,
+                       "pct_over": (sig - oh) / abs(oh) * 100, "gap": gap, "R": {}, "plan": {}, **feats}
+                after = D[k + 1:FLAT + 1]
+                a14 = fx.atr(D[:k + 1])
+                for st in STOPS:
+                    stop = tm.cents_away((oh + ol) / 2 if st == "or-mid" else ol, True)
+                    risk = sig - stop
+                    if risk <= 0 or not (0.15 <= risk / abs(sig) * 100 <= 2.5):
                         continue
-                    row["plan"][(st, tg)] = (stop, target)
-                    for ex in EXITS:
-                        mode, _, kk = ex.partition(":")
-                        done = [row["R"][(st, t0, ex)] for t0 in TARGETS if (st, t0, ex) in row["R"]]
-                        if mode in fx.TRAILING and done:
-                            # trailing exits have no target: the same result for every target
-                            row["R"][(st, tg, ex)] = done[0]
+                    for tg in TARGETS:
+                        target = round(sig + float(tg[:-1]) * risk, 2)
+                        if fill <= stop or fill >= target:
                             continue
-                        row["R"][(st, tg, ex)] = fx.simulate_exit(after, fill, stop, target, risk, mode,
-                                                                  atr_value=a14, k=float(kk or 2))
-            if row["R"]:
-                rows.append(row)
+                        sgn = 1 if side == "buy" else -1
+                        row["plan"][(st, tg)] = (sgn * stop, sgn * target)
+                        for ex in EXITS:
+                            mode, _, kk = ex.partition(":")
+                            done = [row["R"][(st, t0, ex)] for t0 in TARGETS if (st, t0, ex) in row["R"]]
+                            if mode in fx.TRAILING and done:
+                                row["R"][(st, tg, ex)] = done[0]   # no target: the same for every target
+                                continue
+                            row["R"][(st, tg, ex)] = fx.simulate_exit(after, fill, stop, target, risk, mode,
+                                                                      atr_value=a14, k=float(kk or 2))
+                if row["R"]:
+                    if side == "sell":
+                        row["entry"] = -sig
+                    rows.append(row)
     return rows
 
 
 def keep(row, f):
+    sides = f.get("sides", "long")
+    if (sides == "long" and row["side"] != "buy") or (sides == "short" and row["side"] != "sell"):
+        return False
     if f.get("max_pct_over") and row["pct_over"] > f["max_pct_over"]:
         return False
     if f.get("gap_filter") and row["gap"] < 0:
@@ -187,10 +202,11 @@ def gated(data, rows, s, recent_from, edges=(0.0, 2.0, 5.0), replays=600):
         if len(past) < 20:
             continue
         stop, target = r["plan"][(s["stop"], s["target"])]
-        ck = (r["sym"], r["date"], r["k"], stop, target)
+        ck = (r["sym"], r["date"], r["side"], r["k"], stop, target)
         mc = _mc_cache.get(ck)
         if mc is None:
-            m = tm.simulate(tm.build_pool(past), r["entry"], stop, target, r["k"], FLAT, replays=replays, seed=19)
+            m = tm.simulate(tm.build_pool(past), r["entry"], stop, target, r["k"], FLAT, replays=replays, seed=19,
+                            side=r["side"])
             mc = _mc_cache[ck] = (m["p_target"], m["p_stop"], m["avg_R"])
         sided = (mc[0] + mc[1]) or 1e-9
         edge = (mc[0] / sided - 1 / (1 + tr)) * 100
@@ -213,6 +229,7 @@ def describe(s, edge=None):
     bits = ["OR%s" % s["or_minutes"], s["stop"], "TM-Ziel " + s["target"] if s.get("exit_mode") in fx.TRAILING
             else s["target"], "bis " + s["last_entry"],
             "Ausstieg " + exit_label(s)]
+    bits.insert(0, {"long": "nur Long", "short": "nur Short", "both": "Long + Short"}.get(s.get("sides", "long"), "nur Long"))
     if s.get("max_pct_over"):
         bits.append("≤%s%% über Range" % s["max_pct_over"])
     if s.get("gap_filter"):

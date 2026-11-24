@@ -130,3 +130,33 @@ def simulate_exit(bars, fill, stop, target, risk, mode, at_R=1.0, atr_value=None
                 half = (trig - fill) / risk
     r = (bars[-1]["c"] - fill) / risk
     return r if half is None else 0.5 * half + 0.5 * r
+
+
+# ---------------------------------------------------------------- short side
+def mirror(bars):
+    """A short is a long on the price mirrored at zero: every rule above works unchanged
+    (a close below the range low is a close above the mirrored range high, and so on)."""
+    if isinstance(bars, dict):
+        return {k: mirror_bar(b) for k, b in bars.items()}
+    return [mirror_bar(b) for b in bars]
+
+
+def mirror_bar(b):
+    return {**b, "o": -b["o"], "h": -b["l"], "l": -b["h"], "c": -b["c"]}
+
+
+def trail_level_side(side, mode, fill, stop, risk, extreme, atr_value=None, k=2.0):
+    """trail_level for either side. For a short, `extreme` is the lowest low since the fill
+    and the stop moves DOWN (rounded up to the cent)."""
+    if side == "buy":
+        return trail_level(mode, fill, stop, risk, extreme, atr_value, k)
+    return -trail_level(mode, -fill, -stop, risk, -extreme, atr_value, k)
+
+
+def short_features(D, spy, k, n, past):
+    """Features of a breakdown, oriented so that the same filters apply:
+    market_ok = SPY red since the open, rs = how much WEAKER than SPY the stock is."""
+    rs = rel_strength(D, spy, k)
+    ch = day_change(spy, k) if spy is not None else None
+    return {"rvol": rvol(D, past, n), "market_ok": True if ch is None else ch < 0,
+            "rs": None if rs is None else -rs}

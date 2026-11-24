@@ -28,6 +28,8 @@ def _mod(name, rel):
 
 
 entrymod = _mod("dash_entry", "trader-entry/entry.py")
+sys.path.insert(0, os.path.join(ROOT, "autopilot"))
+import stats  # noqa: E402
 
 
 def chart(symbol, date, interval="5m"):
@@ -140,6 +142,19 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, f.read(), "text/html; charset=utf-8", cookie=True)
         if p == "/api/state":
             return self._send(200, state())
+        if p == "/api/export":
+            import export
+            data, man = export.build(ROOT)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="autopilot-export-%s.zip"'
+                             % datetime.date.today().isoformat())
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if p == "/api/stats":
+            return self._send(200, stats.report(AP))
         if p == "/api/chart":
             q = parse_qs(urlparse(self.path).query)
             try:

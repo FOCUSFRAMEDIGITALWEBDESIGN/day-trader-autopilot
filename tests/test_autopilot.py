@@ -20,6 +20,26 @@ ATR_AT_ENTRY = 3.2182     # 14-bar ATR of TSLA's 9:30-10:10 bars on 2026-10-19 (
 TRAIL_AT_1045 = 361.95    # 366.78 high - 1.5 x ATR, rounded down to the cent
 
 
+def reflect(src, dst, R=730.0):
+    """TSLA's real chart, mirrored around R: every breakout becomes a breakdown with the same numbers."""
+    import gzip
+    op = gzip.open if src.endswith(".gz") else open
+    with op(src, "rt") as f:
+        doc = json.load(f)
+    r = doc["chart"]["result"][0]
+    q = r["indicators"]["quote"][0]
+    h, l = q["high"], q["low"]
+    q["open"] = [None if v is None else R - v for v in q["open"]]
+    q["close"] = [None if v is None else R - v for v in q["close"]]
+    q["high"], q["low"] = [None if v is None else R - v for v in l], [None if v is None else R - v for v in h]
+    for k in ("previousClose", "chartPreviousClose", "regularMarketPrice"):
+        if isinstance(r["meta"].get(k), (int, float)):
+            r["meta"][k] = R - r["meta"][k]
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with (gzip.open if dst.endswith(".gz") else open)(dst, "wt") as f:
+        json.dump(doc, f)
+
+
 def post(path, body):
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (PORT, path), data=json.dumps(body).encode(),
                                  method="POST", headers={"Content-Type": "application/json"})
@@ -34,6 +54,7 @@ class AutopilotReel(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def setUp(self):
         # a throw-away copy of the project so trader/ starts empty
@@ -181,6 +202,73 @@ class AutopilotReel(unittest.TestCase):
         t = st["day"]["trades"][0]
         self.assertEqual(t["status"], "stop")       # 361.95 is under the fill 364.30: a loss, smaller than planned
         self.assertEqual(t["pnl"], round((TRAIL_AT_1045 - 364.30) * 8, 2))
+
+    def short_setup(self, extra):
+        fx = os.path.join(self.d, "tests", "fixtures")
+        reflect(os.path.join(fx, "trader-entry", "TSLA-2026-10-19-5m.json"), os.path.join(self.d, "refl", "TSLA.json"))
+        reflect(os.path.join(fx, "trader-timemachine", "TSLA-60d5m.json.gz"), os.path.join(self.d, "refl", "TSLA-60d.json.gz"))
+        sim = dict(SIM, scan="refl/TSLA.json", entry="refl/TSLA.json", tm="refl/TSLA-60d.json.gz")
+        ap = dict({"sides": "short", "target": "1R", "tm_hist_min_avg_R": None, "tm_min_edge_pts": -99,
+                   "tm_min_avg_R": -9, "tm_replays": 2000, "gap_filter": False}, **extra)
+        json.dump(dict(ap, sim=sim, symbols=["TSLA"], premarket_scan=False),
+                  open(os.path.join(self.d, "trader", "autopilot.json"), "w"))
+        mock_broker.S["prices"]["TSLA"] = 365.70
+
+    def test_short_breakdown_to_target(self):
+        self.short_setup({})
+        st, out = self.tick("2026-10-19 10:15")
+        c = st["day"]["candidates"][0]
+        for stage in ("scanner", "news", "entry", "exit", "timemachine", "budget", "risk", "broker"):
+            self.assertTrue(c["stages"][stage]["ok"], (stage, c["stages"]))
+        self.assertEqual((c["side"], c["plan"]["entry"], c["plan"]["stop"], c["plan"]["target"]),
+                         ("sell", 365.82, 371.68, 359.96))           # the reel's numbers, mirrored
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["side"], t["qty"], t["fill_price"]), ("sell", 8.0, 365.70))
+        self.assertEqual(mock_broker.S["positions"]["TSLA"]["qty"], -8.0)
+        pf = json.load(open(os.path.join(self.d, "trader", "portfolio.json")))
+        self.assertEqual([p["shares"] for p in pf["positions"] if p["ticker"] == "TSLA"], [-8.0])
+        risk = json.load(open(os.path.join(self.d, "trader", "state", "risk.json")))
+        self.assertEqual(risk["results"][0]["verdict"], "PASS")
+        cfg = json.load(open(os.path.join(self.d, "trader", "config.json")))
+        self.assertFalse(cfg.get("allow_short"))                     # the user's config is untouched
+        post("/mock/fill_leg", {"symbol": "TSLA", "type": "limit"})   # buy-to-cover at the target
+        st, out = self.tick("2026-10-19 11:00")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["status"], t["exit_price"], t["pnl"]), ("target", 359.96, 45.92))
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+        pf = json.load(open(os.path.join(self.d, "trader", "portfolio.json")))
+        self.assertEqual([p for p in pf["positions"] if p["ticker"] == "TSLA"], [])
+
+    def test_short_flat_by_close_and_partial(self):
+        self.short_setup({"exit_mode": "partial", "target": "2R"})
+        self.tick("2026-10-19 10:15")
+        post("/mock/price", {"TSLA": 359.80})              # 1R in favour of the short (365.70 - 5.86)
+        st, out = self.tick("2026-10-19 10:40")
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["exit_adjusted"], t["qty_open"], t["stop_now"]), ("partial", 4.0, 365.7))
+        self.assertEqual(mock_broker.S["positions"]["TSLA"]["qty"], -4.0)
+        post("/mock/price", {"TSLA": 363.00})
+        st, out = self.tick("2026-10-19 15:55")            # the rest is covered by the close
+        t = st["day"]["trades"][0]
+        self.assertEqual(t["status"], "flat")
+        self.assertEqual(t["pnl"], round(4 * (365.70 - 359.80) + 4 * (365.70 - 363.00), 2))
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+        self.assertTrue(all(o["status"] != "new" for o in mock_broker.S["orders"].values()))
+
+    def test_stocks_in_play_join_the_list(self):
+        import datetime
+        self.autopilot({"target": "1R", "sim_in_play": True})
+        os.makedirs(os.path.join(self.d, "trader", "autopilot"), exist_ok=True)
+        json.dump({"built": datetime.date.today().isoformat(), "symbols": [{"symbol": "NVDA"}, {"symbol": "KO"}]},
+                  open(os.path.join(self.d, "trader", "autopilot", "liquid.json"), "w"))
+        mock_broker.S["snapshots"] = {
+            "NVDA": {"dailyBar": {"o": 206.0, "c": 207, "v": 4e6}, "prevDailyBar": {"c": 200.0, "v": 4e7}},
+            "KO": {"dailyBar": {"o": 70.0, "c": 70, "v": 1e5}, "prevDailyBar": {"c": 70.0, "v": 1e7}}}
+        self.tick("2026-10-19 09:20")
+        st, out = self.tick("2026-10-19 09:46")
+        self.assertEqual(st["day"]["symbols"], ["TSLA", "NVDA"])
+        self.assertEqual(st["day"]["in_play"][0]["symbol"], "NVDA")
+        self.assertIn("stocks in play: 1 found", out)
 
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")

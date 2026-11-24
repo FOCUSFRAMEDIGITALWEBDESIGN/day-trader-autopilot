@@ -164,23 +164,27 @@
 
       // markers: buy, partial sells, the exit
       const m = [];
-      if (tIn) m.push({ time: tIn, position: "belowBar", color: BLUE, shape: "arrowUp", text: `Kauf ${t.qty} @ ${f2(fill)}` });
-      (t.partials || []).forEach((x) => x.at && m.push({ time: tsOf(t.date, x.at, step), position: "aboveBar", color: GREEN,
-        shape: "arrowDown", text: `Teilverkauf ${x.qty} @ ${f2(x.price)}` }));
-      log.slice(1).forEach(([ts, v]) => m.push({ time: ts, position: "belowBar", color: RED, shape: "circle", text: `Stop ${f2(v)}` }));
-      if (closed && tOut && t.exit_price != null) m.push({ time: tOut, position: "aboveBar", color: (t.pnl || 0) >= 0 ? GREEN : RED,
-        shape: "arrowDown", text: `${EXIT_TXT[t.status] || t.status} @ ${f2(t.exit_price)}` });
+      const short = t.side === "sell", sgn = short ? -1 : 1;
+      const IN = short ? { position: "aboveBar", shape: "arrowDown", text: `Short ${t.qty} @ ${f2(fill)}` }
+                       : { position: "belowBar", shape: "arrowUp", text: `Kauf ${t.qty} @ ${f2(fill)}` };
+      const OUT = short ? { position: "belowBar", shape: "arrowUp" } : { position: "aboveBar", shape: "arrowDown" };
+      if (tIn) m.push({ time: tIn, color: BLUE, ...IN });
+      (t.partials || []).forEach((x) => x.at && m.push({ time: tsOf(t.date, x.at, step), color: GREEN, ...OUT,
+        text: `${short ? "Teil-Rückkauf" : "Teilverkauf"} ${x.qty} @ ${f2(x.price)}` }));
+      log.slice(1).forEach(([ts, v]) => m.push({ time: ts, position: short ? "aboveBar" : "belowBar", color: RED, shape: "circle", text: `Stop ${f2(v)}` }));
+      if (closed && tOut && t.exit_price != null) m.push({ time: tOut, color: (t.pnl || 0) >= 0 ? GREEN : RED, ...OUT,
+        text: `${EXIT_TXT[t.status] || t.status} @ ${f2(t.exit_price)}` });
       const times = new Set(bars.map((b) => b.time));
       this.candles.setMarkers(m.filter((x) => times.has(x.time)).sort((a, b) => a.time - b.time));
 
       // header and footer
       const last = bars[bars.length - 1].close;
-      const pnl = closed ? t.pnl : (t.partials || []).reduce((a, x) => a + (x.price - fill) * x.qty, 0) + (last - fill) * (t.qty_open || t.qty);
+      const pnl = closed ? t.pnl : sgn * ((t.partials || []).reduce((a, x) => a + (x.price - fill) * x.qty, 0) + (last - fill) * (t.qty_open || t.qty));
       const rNow = risk ? (pnl / (risk * t.qty)) : null;
       const badge = this.host.querySelector(".tc-badge");
       badge.textContent = closed ? (EXIT_TXT[t.status] || t.status) : "offen";
       badge.className = "tc-badge " + (closed ? ((t.pnl || 0) >= 0 ? "win" : "loss") : "open");
-      this.host.querySelector(".tc-sub").textContent = `${t.date} · ${t.qty} Stück · Einstieg ${f2(fill)} um ${t.at}`;
+      this.host.querySelector(".tc-sub").textContent = `${short ? "SHORT · " : "LONG · "}${t.date} · ${t.qty} Stück · Einstieg ${f2(fill)} um ${t.at}`;
       const stopNow = stopAt(tOut || bars[bars.length - 1].time);
       this.host.querySelector(".tc-foot").innerHTML =
         `<span>Stop <b>${f2(stopNow)}</b>${log.length > 1 ? ` (${log.length - 1}× nachgezogen)` : ""}</span>` +

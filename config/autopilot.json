@@ -93,5 +93,12 @@
  "exit_at_R": 1.0,
  "learn_years": 2,
  "learn_weekly": true,
- "strategy_version": 1
+ "strategy_version": 1,
+ "sides": "both",
+ "in_play": true,
+ "in_play_max": 30,
+ "in_play_min_gap": 1.0,
+ "in_play_min_rvol": 1.5,
+ "in_play_min_price": 10,
+ "in_play_universe": 1500
 }

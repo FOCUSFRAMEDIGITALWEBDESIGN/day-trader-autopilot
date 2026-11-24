@@ -143,16 +143,39 @@ class Alpaca:
                                                          urllib.parse.urlencode(q)), retries=4) or {}
         return r.get("bars") or [], r.get("next_page_token")
 
+    def multi_bars(self, symbols, timeframe, start, end=None, feed="sip"):
+        """Bars for many symbols in one call (paged). -> {SYM: [bars]}"""
+        out, token = {}, None
+        while True:
+            q = {"symbols": ",".join(symbols), "timeframe": timeframe, "start": start, "feed": feed,
+                 "limit": 10000, "adjustment": "split"}
+            if end:
+                q["end"] = end
+            if token:
+                q["page_token"] = token
+            r = self._req("GET", "%s/v2/stocks/bars?%s" % (self.data, urllib.parse.urlencode(q)), retries=4) or {}
+            for sym, bars in (r.get("bars") or {}).items():
+                out.setdefault(sym, []).extend(bars)
+            token = r.get("next_page_token")
+            if not token:
+                return out
+
+    def snapshots(self, symbols, feed="iex"):
+        """Latest trade, today's bar and yesterday's bar for many symbols. -> {SYM: snapshot}"""
+        r = self._req("GET", "%s/v2/stocks/snapshots?%s" % (self.data, urllib.parse.urlencode(
+            {"symbols": ",".join(symbols), "feed": feed})), retries=3) or {}
+        return r.get("snapshots", r) if isinstance(r, dict) else {}
+
     def replace(self, order_id, **fields):
         """PATCH an open order, e.g. a bracket's stop-loss leg: replace(id, stop_price="364.30")."""
         return self._req("PATCH", self.base + "/v2/orders/" + order_id,
                          {k: str(v) for k, v in fields.items()}, retries=1)
 
-    def submit_raw(self, body):
+    def submit_raw(self, body, closing_short=False):
         """An exit order the autopilot builds itself (a market sell of part of a position,
-        or an OCO pair protecting the rest). Sells only."""
-        if body.get("side") != "sell":
-            raise AlpacaError("submit_raw only sends sells")
+        or an OCO pair protecting the rest). Sells only, or buys that cover a short."""
+        if body.get("side") != "sell" and not (closing_short and body.get("side") == "buy"):
+            raise AlpacaError("submit_raw only sends exits")
         if not self._account_checked:
             self.account()
         return self._req("POST", self.base + "/v2/orders", body, retries=1)

@@ -14,17 +14,18 @@ LOCK = threading.Lock()
 
 
 def _pos_fill(sym, side, qty, price):
+    """Signed positions: a short is a negative qty with a negative cost basis."""
     p = S["positions"].setdefault(sym, {"qty": 0.0, "cost": 0.0})
-    if side == "buy":
-        p["qty"] += qty
-        p["cost"] += qty * price
-        S["cash"] -= qty * price
+    d = qty if side == "buy" else -qty
+    opening = p["qty"] == 0 or (p["qty"] > 0) == (d > 0)
+    if opening:
+        p["cost"] += d * price
     else:
-        avg = p["cost"] / p["qty"] if p["qty"] else price
-        p["qty"] -= qty
-        p["cost"] -= avg * qty
-        S["cash"] += qty * price
-    if p["qty"] <= 1e-9:
+        avg = p["cost"] / p["qty"]
+        p["cost"] += d * avg
+    p["qty"] += d
+    S["cash"] -= d * price
+    if abs(p["qty"]) <= 1e-9:
         S["positions"].pop(sym, None)
 
 
@@ -80,6 +81,15 @@ class H(BaseHTTPRequestHandler):
             if path.startswith("/v2/orders/"):
                 o = S["orders"].get(path.rsplit("/", 1)[1])
                 return self._send(200, _order_view(o)) if o else self._send(404, {"message": "not found"})
+            if path == "/v2/stocks/snapshots":
+                q = parse_qs(urlparse(self.path).query)
+                want = q.get("symbols", [""])[0].split(",")
+                return self._send(200, {s: S["snapshots"][s] for s in want if s in S.get("snapshots", {})})
+            if path == "/v2/stocks/bars":
+                q = parse_qs(urlparse(self.path).query)
+                want = q.get("symbols", [""])[0].split(",")
+                return self._send(200, {"bars": {s: S["daily"][s] for s in want if s in S.get("daily", {})},
+                                        "next_page_token": None})
             if path.startswith("/v2/stocks/") and path.endswith("/bars"):
                 q = parse_qs(urlparse(self.path).query)
                 if q.get("feed", [""])[0] == "sip" and S.get("deny_sip"):
@@ -111,18 +121,20 @@ class H(BaseHTTPRequestHandler):
         with LOCK:
             if path == "/v2/orders":
                 sym, qty, side = b["symbol"], float(b["qty"]), b["side"]
-                if side == "sell" and S["positions"].get(sym, {}).get("qty", 0) < qty:
+                held_now = S["positions"].get(sym, {}).get("qty", 0)
+                short_entry = side == "sell" and b.get("order_class") == "bracket" and held_now <= 0
+                if side == "sell" and held_now < qty and not short_entry:
                     return self._send(403, {"message": "insufficient qty available for order"})
                 held = sum(float(o["qty"]) for o in S["orders"].values() if o["symbol"] == sym and o["side"] == "sell"
                            and o["type"] == "limit" and o["status"] in ("new", "held"))
-                if side == "sell" and held + qty > S["positions"].get(sym, {}).get("qty", 0) + 1e-9:
+                if side == "sell" and not short_entry and held + qty > held_now + 1e-9:
                     return self._send(403, {"message": "insufficient qty available for order (held for orders)"})
                 if b.get("order_class") == "oco":
                     oid, lid = str(uuid.uuid4()), str(uuid.uuid4())
-                    S["orders"][lid] = {"id": lid, "parent": oid, "symbol": sym, "side": "sell", "qty": b["qty"], "type": "stop",
+                    S["orders"][lid] = {"id": lid, "parent": oid, "symbol": sym, "side": side, "qty": b["qty"], "type": "stop",
                                         "status": "held", "stop_price": b["stop_loss"]["stop_price"], "filled_qty": "0",
                                         "filled_avg_price": None}
-                    o = {"id": oid, "symbol": sym, "side": "sell", "qty": b["qty"], "type": "limit", "order_class": "oco",
+                    o = {"id": oid, "symbol": sym, "side": side, "qty": b["qty"], "type": "limit", "order_class": "oco",
                          "status": "new", "limit_price": b["take_profit"]["limit_price"], "filled_qty": "0",
                          "filled_avg_price": None, "leg_ids": [lid]}
                     S["orders"][oid] = o
@@ -136,7 +148,8 @@ class H(BaseHTTPRequestHandler):
                 if b.get("order_class") == "bracket":
                     for typ, price in (("limit", b["take_profit"]["limit_price"]), ("stop", b["stop_loss"]["stop_price"])):
                         lid = str(uuid.uuid4())
-                        S["orders"][lid] = {"id": lid, "parent": oid, "symbol": sym, "side": "sell", "qty": b["qty"],
+                        S["orders"][lid] = {"id": lid, "parent": oid, "symbol": sym, "side": "sell" if side == "buy" else "buy",
+                                            "qty": b["qty"],
                                             "type": typ, "status": "new" if typ == "limit" else "held",
                                             "limit_price" if typ == "limit" else "stop_price": price,
                                             "filled_qty": "0", "filled_avg_price": None}
@@ -149,7 +162,7 @@ class H(BaseHTTPRequestHandler):
                     if is_exit and o["symbol"] == b["symbol"] and o["type"] == b["type"] and o["status"] in ("new", "held"):
                         px = float(o.get("limit_price") or o.get("stop_price"))
                         o.update(status="filled", filled_qty=o["qty"], filled_avg_price=str(px))
-                        _pos_fill(o["symbol"], "sell", float(o["qty"]), px)
+                        _pos_fill(o["symbol"], o["side"], float(o["qty"]), px)
                         _cancel_family(o)
                         return self._send(200, o)
                 return self._send(404, {"message": "no open leg"})

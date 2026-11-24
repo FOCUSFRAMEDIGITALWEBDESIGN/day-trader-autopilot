@@ -54,6 +54,9 @@ clockmod = _mod("ap_alerts", TOOLS["alerts"])
 entrymod = _mod("ap_entry", TOOLS["entry"])
 tmmod = _mod("ap_tm", TOOLS["tm"])
 import features as fx  # noqa: E402  (shared with the backtest and the learner)
+import shorts  # noqa: E402
+import inplay  # noqa: E402
+scanmod = _mod("ap_scan", TOOLS["scan"])
 ticketmod = _mod("ap_ticket", TOOLS["ticket"])
 
 DEFAULTS = {
@@ -87,6 +90,13 @@ DEFAULTS = {
     "tm_hist_min_trades": 8,
     "tm_hist_min_avg_R": None,
     "stop_after_daily_loss_usd": None,
+    "sides": "both",
+    "in_play": True,
+    "in_play_max": 30,
+    "in_play_min_gap": 1.0,
+    "in_play_min_rvol": 1.5,
+    "in_play_min_price": 10,
+    "in_play_universe": 1500,
     "rvol_min": 0,
     "market_filter": "none",
     "rs_min": None,
@@ -207,6 +217,12 @@ class Pilot:
                 hist.append({"date": prev["date"], "trades": prev.get("trades", []),
                              "funnel": prev.get("funnel", {}), "realized": prev.get("realized", 0.0)})
                 wj(os.path.join(AP, "history.json"), hist[-400:])
+                # the whole day (every candidate with every stage, features and Time Machine numbers)
+                # for the statistics and the weekly export
+                full = {k: v for k, v in prev.items() if k not in ("account", "positions") and not k.startswith("_")}
+                for c in (full.get("candidates") or {}).values():
+                    (c.get("tm") or {}).pop("bands", None)
+                wj(os.path.join(AP, "days", "%s.json" % prev["date"]), full)
             self.state = {"date": today, "symbols": [], "premarket_done": False, "last_scan_bar": None,
                           "candidates": {}, "trades": [], "funnel": {}, "scans": [], "realized": 0.0,
                           "flattened": False, "paused": self.state.get("paused", False)}
@@ -249,6 +265,8 @@ class Pilot:
                         self.flatten_all()
                     else:
                         phase = "trading"
+                        if mins >= hm(st["opens"]) + int(self.ap["or_minutes"]) + 1 and not d.get("in_play_done"):
+                            self.stocks_in_play(mins - hm(st["opens"]))
                         self.maybe_scan(local, st)
                 else:
                     phase = "after close"
@@ -349,10 +367,51 @@ class Pilot:
                            % (len(js["hits"]), len(add)))
             else:
                 self.event("warn", "pre-market scan gave nothing: %s" % (err or "no hits"))
+        if self.ap.get("in_play") and not self.sim:
+            liquid = rj(os.path.join(AP, "liquid.json"), {}) or {}
+            if not liquid.get("symbols") or liquid.get("built", "") < (datetime.date.today() - datetime.timedelta(days=7)).isoformat():
+                try:
+                    uni_path = os.path.join(T, "universe.txt")
+                    uni = [l.split("|")[0].strip().upper() for l in open(uni_path, encoding="utf-8") if l.strip()]
+                    inplay.build_liquid(self.broker, uni, os.path.join(AP, "liquid.json"), int(self.ap["in_play_universe"]),
+                                        float(self.ap["in_play_min_price"]), log=lambda m: self.event("info", m))
+                except Exception as e:
+                    self.event("warn", "liquid universe not built yet: %s" % str(e)[:120])
         blocked = {s.upper() for s in self.cfg.get("blocked", [])}
         d["symbols"] = [s for s in syms if s not in blocked]
         d["premarket_done"] = True
         self.event("info", "today's scan list: %d symbols" % len(d["symbols"]))
+
+    # ------------------------------------------------------------ stocks in play
+    def stocks_in_play(self, minutes_open):
+        """Once a day, when the opening range is complete: add the stocks in play to the scan list."""
+        d = self.state
+        d["in_play_done"] = True
+        if not self.ap.get("in_play") or (self.sim and not self.ap.get("sim_in_play")):
+            return
+        path = os.path.join(AP, "liquid.json")
+        liquid = rj(path, {}) or {}
+        try:
+            if not liquid.get("symbols") or liquid.get("built", "") < (datetime.date.today() - datetime.timedelta(days=7)).isoformat():
+                uni_path = os.path.join(T, "universe.txt")
+                if not os.path.exists(uni_path):
+                    self.tool("scan", "universe", now=False)
+                uni = [l.split("|")[0].strip().upper() for l in open(uni_path, encoding="utf-8") if l.strip()]
+                self.event("info", "stocks in play: building the liquid universe from %d stocks (weekly, a few minutes)" % len(uni))
+                liquid = inplay.build_liquid(self.broker, uni, path, int(self.ap["in_play_universe"]),
+                                             float(self.ap["in_play_min_price"]), log=lambda m: self.event("info", m))
+            got = inplay.rank(self.broker, liquid.get("symbols", []), minutes_open, float(self.ap["in_play_min_gap"]),
+                              float(self.ap["in_play_min_rvol"]), int(self.ap["in_play_max"]))
+        except Exception as e:
+            self.event("warn", "stocks in play skipped: %s" % str(e)[:160])
+            return
+        blocked = {s.upper() for s in self.cfg.get("blocked", [])}
+        new = [r["symbol"] for r in got if r["symbol"] not in d["symbols"] and r["symbol"] not in blocked]
+        d["symbols"] += new
+        d["in_play"] = got
+        self.event("info", "stocks in play: %d found, %d new on today's list%s" % (
+            len(got), len(new), (": " + ", ".join("%s %+.1f%% %.1fx" % (r["symbol"], r["gap"], r["rvol"]) for r in got[:8]))
+            if got else ""))
 
     # ------------------------------------------------------------ every 5-minute bar
     def maybe_scan(self, local, st):
@@ -384,44 +443,66 @@ class Pilot:
         d = self.state
         if not d["symbols"]:
             return
-        args = ["orb", "--symbols", ",".join(d["symbols"]), "--or-minutes", self.ap["or_minutes"],
-                "--min-price", self.ap["scan_min_price"], "--show", 200]
-        code, js, err = self.tool_json("scan", *args, timeout=400)
-        if not js:
-            d["scans"].append({"t": self.ny().strftime("%H:%M"), "hits": 0, "note": err})
-            return
-        hits = js.get("hits", [])
-        d["scans"].append({"t": self.ny().strftime("%H:%M"), "scanned": js.get("scanned"), "hits": len(hits)})
+        sides = self.ap.get("sides", "long")
+        hits, scanned, note = [], None, None
+        if sides in ("long", "both"):
+            args = ["orb", "--symbols", ",".join(d["symbols"]), "--or-minutes", self.ap["or_minutes"],
+                    "--min-price", self.ap["scan_min_price"], "--show", 200]
+            code, js, err = self.tool_json("scan", *args, timeout=400)
+            if js:
+                hits += [dict(h, side="buy") for h in js.get("hits", [])]
+                scanned = js.get("scanned")
+            else:
+                note = err
+        if sides in ("short", "both"):
+            try:
+                local = self.ny()
+                off = (self.ap.get("sim") or {}).get("scan") if self.sim else None
+                sh, n_sc = shorts.scan_breakdowns(scanmod, d["symbols"], local.date(), local.replace(second=0),
+                                                  int(self.ap["or_minutes"]) // 5, float(self.ap["scan_min_price"]),
+                                                  offline=os.path.join(ROOT, off) if off else None)
+                hits += [dict(h, side="sell") for h in sh]
+                scanned = max(scanned or 0, n_sc)
+            except Exception as e:
+                note = "short scan: %s" % str(e)[:120]
+        d["scans"].append({"t": self.ny().strftime("%H:%M"), "scanned": scanned, "hits": len(hits),
+                           "long": sum(1 for h in hits if h["side"] == "buy"),
+                           "short": sum(1 for h in hits if h["side"] == "sell"), "note": note})
         d["scans"] = d["scans"][-100:]
         fresh = []
         for h in hits:
             sym = h["symbol"]
-            if sym in d["candidates"]:
+            key = sym if h["side"] == "buy" else sym + ":short"
+            if key in d["candidates"]:
                 continue
             age = mins - hm(h["at"])
-            c = {"symbol": sym, "first_seen": self.ny().strftime("%H:%M"), "scan": h, "stages": {}}
-            d["candidates"][sym] = c
+            c = {"symbol": sym, "side": h["side"], "first_seen": self.ny().strftime("%H:%M"), "scan": h, "stages": {}}
+            d["candidates"][key] = c
             self.bump("scanner")
             if age > int(self.ap["max_signal_age_min"]):
                 self.reject(c, "scanner", "broke out at %s, %d min ago: a late entry is a different trade"
                             % (h["at"], age))
                 continue
             if self.ap.get("max_pct_over") and h.get("pct_over", 0) > float(self.ap["max_pct_over"]):
-                self.reject(c, "scanner", "closed %.2f%% over the range, more than %.2f%%: extended"
-                            % (h["pct_over"], float(self.ap["max_pct_over"])))
+                self.reject(c, "scanner", "closed %.2f%% %s the range, more than %.2f%%: extended"
+                            % (h["pct_over"], "over" if h["side"] == "buy" else "under", float(self.ap["max_pct_over"])))
                 continue
-            c["stages"]["scanner"] = {"ok": True, "note": "closed %.2f%% over the range at %s" % (h["pct_over"], h["at"])}
+            c["stages"]["scanner"] = {"ok": True, "note": "closed %.2f%% %s the range at %s" % (
+                h["pct_over"], "over" if h["side"] == "buy" else "under", h["at"])}
             fresh.append(c)
         if fresh:
-            self.event("info", "scan %s: %d breakouts, %d fresh: %s" % (self.ny().strftime("%H:%M"), len(hits),
-                       len(fresh), ", ".join(c["symbol"] for c in fresh)))
+            self.event("info", "scan %s: %d signals, %d fresh: %s" % (self.ny().strftime("%H:%M"), len(hits),
+                       len(fresh), ", ".join(c["symbol"] + ("" if c["side"] == "buy" else " (short)") for c in fresh)))
         for c in fresh[: int(self.ap["max_candidates_per_bar"])]:
             open_n = sum(1 for t in d["trades"] if t.get("status") in ("open", "pending"))
             entries = sum(1 for t in d["trades"] if t.get("status") != "rejected")
             if open_n >= int(self.ap["max_open_positions"]) or entries >= int(self.cfg.get("max_trades_per_day", 3)):
                 self.reject(c, "limits", "the day's position / trade limit is reached")
                 continue
-            self.pipeline(c)
+            if any(t.get("symbol") == c["symbol"] and t.get("status") in ("open", "pending") for t in d["trades"]):
+                self.reject(c, "limits", "a trade in %s is already open" % c["symbol"])
+                continue
+            (self.pipeline if c["side"] == "buy" else self.pipeline_short)(c)
         for c in fresh[int(self.ap["max_candidates_per_bar"]):]:
             self.reject(c, "scanner", "more fresh breakouts than max_candidates_per_bar this bar")
 
@@ -435,9 +516,8 @@ class Pilot:
         self.bump(stage)
 
     # ------------------------------------------------------------ one candidate, the whole chain
-    def pipeline(self, c):
+    def step_news(self, c):
         sym = c["symbol"]
-        # 2. news
         args = ["--tickers", sym, "--hours", self.ap["news_hours"], "--dry-run"]
         if not (self.cfg.get("sec_user_agent") and "@" in str(self.cfg.get("sec_user_agent"))
                 and "example.com" not in str(self.cfg.get("sec_user_agent"))):
@@ -451,10 +531,18 @@ class Pilot:
         c["news"] = [{"time": i.get("time"), "title": i.get("title"), "tags": i.get("tags"), "link": i.get("link"),
                       "kind": i.get("kind")} for i in items[:6]]
         if bad:
-            return self.reject(c, "news", "blocked by news: %s" % bad[0].get("title", "")[:120])
+            self.reject(c, "news", "blocked by news: %s" % bad[0].get("title", "")[:120])
+            return False
         self.ok(c, "news", "%d items in %sh, none blocking%s" % (
             len(items), self.ap["news_hours"], ("; %+.1f%% vs yesterday" % move["pct"]) if move and
             move.get("pct") is not None else ""))
+        return True
+
+    def pipeline(self, c):
+        sym = c["symbol"]
+        # 2. news
+        if not self.step_news(c):
+            return
 
         # 3. entry
         eargs = ["check", sym, "--write", "--or-minutes", self.ap["or_minutes"]]
@@ -499,10 +587,20 @@ class Pilot:
             plan["stop"], plan["target"], plan.get("target_r"), plan["risk_per_share"]))
 
         # 5. time machine
+        if not self.step_tm(c, plan):
+            return
+        # fresh price for budget and risk (the higher price means a bigger risk, fewer shares)
+        ok, last = self.step_price(c, plan, "buy")
+        if not ok:
+            return
+        return self.long_budget_risk_place(c, plan)
+
+    def step_tm(self, c, plan):
         code, js, err = self.tool_json("tm", "run", "--write", "--until", self.cfg.get("flat_by", "15:55"),
                                        "--replays", self.ap["tm_replays"], "--seed", self.ap["tm_seed"], timeout=300)
         if not js or not js.get("mc"):
-            return self.reject(c, "timemachine", "time machine could not run: %s" % err)
+            self.reject(c, "timemachine", "time machine could not run: %s" % err)
+            return False
         mc, hist = js["mc"], js.get("history", {})
         R = float(mc.get("r_at_target") or plan.get("target_r") or 1)
         sided = (mc["p_target"] + mc["p_stop"]) or 1e-9
@@ -524,11 +622,16 @@ class Pilot:
                 (hist.get("avg_R") if hist.get("avg_R") is not None else 0) < float(self.ap["tm_hist_min_avg_R"]):
             why = "the same rule on the last %d sessions averaged %+.3f R" % (hist["sessions"], hist["avg_R"])
         if why:
-            return self.reject(c, "timemachine", why)
+            self.reject(c, "timemachine", why)
+            return False
         self.ok(c, "timemachine", "target %.1f%% / stop %.1f%% / neither %.1f%%, edge %+.1f pts, avg R %+.3f" % (
             100 * mc["p_target"], 100 * mc["p_stop"], 100 * mc["p_neither"], edge, mc["avg_R"]))
+        return True
 
-        # fresh price for budget and risk (the higher price means a bigger risk, fewer shares)
+    def step_price(self, c, plan, side):
+        """A fresh price (Alpaca real time, Yahoo as the fallback) into trader/prices.json.
+        Returns (still_valid, price)."""
+        sym = c["symbol"]
         last = None if self.sim else self.broker.latest_trade(sym)   # Alpaca, real time
         code = 0 if (self.sim or last) else self.tool("alerts", "quote", sym, "--write", now=False, timeout=60)[0]
         if last or code != 0:
@@ -540,10 +643,15 @@ class Pilot:
                 wj(os.path.join(T, "prices.json"), pr)
         px = ((rj(os.path.join(T, "prices.json"), {}) or {}).get("prices") or {}).get(sym)
         last = float(px["price"] if isinstance(px, dict) else px) if px else None
-        if last and (last >= plan["target"] or last <= plan["stop"]):
-            return self.reject(c, "budget", "price %.2f is already past the %s" % (
-                last, "target" if last >= plan["target"] else "stop"))
+        past_t = last and (last >= plan["target"] if side == "buy" else last <= plan["target"])
+        past_s = last and (last <= plan["stop"] if side == "buy" else last >= plan["stop"])
+        if past_t or past_s:
+            self.reject(c, "budget", "price %.2f is already past the %s" % (last, "target" if past_t else "stop"))
+            return False, last
+        return True, last
 
+    def long_budget_risk_place(self, c, plan):
+        sym = c["symbol"]
         # 6. budget (a stale orders.json must never be mistaken for this one)
         try:
             os.remove(os.path.join(T, "orders.json"))
@@ -566,6 +674,77 @@ class Pilot:
 
         # 8. broker
         self.place(c, o, plan)
+
+    def pipeline_short(self, c):
+        """An opening-range breakdown: the same chain, mirrored (autopilot/shorts.py)."""
+        sym, h = c["symbol"], c["scan"]
+        if not self.step_news(c):
+            return
+        # 3. entry: the breakdown bar from the scan, checked like trader-entry checks a breakout
+        n = int(self.ap["or_minutes"]) // 5
+        if self.ap.get("gap_filter"):
+            gap = self.day_open_vs_prev(sym)
+            if gap is not None and gap > 0:
+                return self.reject(c, "entry", "opened %.2f%% above yesterday's close: gap filter (short)" % gap)
+        if self.ap.get("rvol_min") or self.ap.get("market_filter") not in (None, "none") \
+                or self.ap.get("rs_min") is not None:
+            f = self.live_features(sym, int(h["bar_index"]), n, side="sell")
+            c["features"] = f
+            ok, why = fx.passes(f, self.ap)
+            if not ok:
+                return self.reject(c, "entry", "filter: " + why)
+        trig = {"time": h["at"], "price": h["price"], "bar_index": h["bar_index"], "pct_over": -h["pct_over"]}
+        self.ok(c, "entry", "breakdown %s at %.2f (%.2f%% under %.2f)%s" % (
+            h["at"], h["price"], h["pct_over"], h["or_low"], self.feature_note(c.get("features"))),
+            trigger=trig, opening_range={"high": h["or_high"], "low": h["or_low"], "minutes": n * 5})
+        # 4. exit plan (mirror of trader-exit) -> trader/plan.json for the Time Machine
+        plan, why = shorts.plan_short(sym, self.state["date"], h["price"], h["at"], h["bar_index"], h["or_high"],
+                                      h["or_low"], self.ap["stop"], self.ap["target"], self.cfg.get("flat_by", "15:55"),
+                                      n * 5)
+        if not plan:
+            return self.reject(c, "exit", "short plan refused: " + why)
+        risk_pct = plan["risk_per_share"] / plan["entry"] * 100
+        if not (float(self.ap["min_risk_pct"]) <= risk_pct <= float(self.ap["max_risk_pct"])):
+            return self.reject(c, "exit", "risk %.2f%% of the price is outside %.2f-%.2f%%" % (
+                risk_pct, float(self.ap["min_risk_pct"]), float(self.ap["max_risk_pct"])))
+        wj(os.path.join(T, "plan.json"), plan)
+        c["plan"] = {k: plan.get(k) for k in ("entry", "stop", "target", "risk_per_share", "reward_risk",
+                                              "target_r", "stop_label", "flat_by", "entry_time")}
+        self.ok(c, "exit", "short: stop %.2f, target %.2f (%sR), risk %.2f a share" % (
+            plan["stop"], plan["target"], plan["target_r"], plan["risk_per_share"]))
+        # 5. time machine (the pack's, side sell)
+        if not self.step_tm(c, plan):
+            return
+        ok, last = self.step_price(c, plan, "sell")
+        if not ok:
+            return
+        # 6. budget (mirror of trader-budget)
+        pf = rj(os.path.join(T, "portfolio.json"), {}) or {}
+        order, why = shorts.size_short(self.cfg, plan, price=last, cash=pf.get("cash"))
+        if not order:
+            return self.reject(c, "budget", "short size refused: " + why)
+        wj(os.path.join(T, "orders.json"), shorts.orders_doc(order, self.now_utc()))
+        self.ok(c, "budget", "short %s shares, max loss $%.2f" % (order["qty"], order["plan"]["max_loss"]),
+                qty=order["qty"], max_loss=order["plan"]["max_loss"])
+        # 7. risk: the pack's own check, with allow_short on for this order only
+        rc = shorts.risk_config(self.cfg, os.path.join(AP, "risk-config-short.json"))
+        code, js, err = self.tool_json("risk", "--config", rc, timeout=60)
+        r = ((js or {}).get("results") or [{}])[0]
+        if r.get("verdict") != "PASS":
+            return self.reject(c, "risk", "BLOCK: %s" % "; ".join(r.get("reasons") or [str(err)]))
+        self.ok(c, "risk", "PASS: " + " | ".join(r.get("info", [])[:2]), fingerprint=r.get("fingerprint"))
+        # 8. broker
+        self.place(c, order, plan)
+
+    def record_fill(self, t, side, qty, price):
+        """A fill in the pack's books: trader-broker's ticket.py for longs; for shorts the
+        portfolio is kept by shorts.apply_fill (the pack cannot hold a negative position)."""
+        if t.get("side", "buy") == "buy":
+            self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", side, "--qty", qty, "--price", price)
+            return
+        shorts.apply_fill(os.path.join(T, "portfolio.json"), self.cfg, t["symbol"], side, qty, price, self.state["date"])
+        ticketmod.log_fill(os.path.join(T, "state", "broker.json"), self.now_utc(), self.state["date"],
+                           t["symbol"], side, qty, price)
 
     def day_open_vs_prev(self, sym):
         """Today's 9:30 open against yesterday's close, in percent (None if unknown)."""
@@ -603,7 +782,7 @@ class Pilot:
         cache[key] = out
         return out
 
-    def live_features(self, sym, k, n):
+    def live_features(self, sym, k, n, side="buy"):
         f = {"rvol": None, "market_ok": True, "rs": None}
         try:
             D, past = self._sessions(sym, "1mo")
@@ -616,6 +795,9 @@ class Pilot:
             f["market_ok"] = fx.market_ok(spy, k, self.ap.get("market_filter") or "green")
             f["rs"] = fx.rel_strength(D, spy, k) if D else None
             f["spy_change"] = fx.day_change(spy, k)
+            if side == "sell":   # oriented for a short: SPY red is ok, weaker than SPY is strong
+                f["market_ok"] = f["spy_change"] is None or f["spy_change"] < 0
+                f["rs"] = None if f["rs"] is None else -f["rs"]
         except Exception as e:
             f["note"] = (f.get("note", "") + " SPY: %s" % str(e)[:80]).strip()
         for x in ("rvol", "rs", "spy_change"):
@@ -675,13 +857,17 @@ class Pilot:
         oid = res.get("id")
         filled = self.broker.wait_fill(oid, seconds=4 if self.sim else 20) or res
         fq, fp = filled.get("filled_qty"), filled.get("filled_avg_price")
+        side = order.get("side", "buy")
         args = ["result", "--index", 1, "--status", "placed", "--broker-id", oid]
-        if fq and fp and float(fq) > 0:
+        if fq and fp and float(fq) > 0 and side == "buy":
             args += ["--filled-qty", fq, "--filled-price", fp]
         self.tool("ticket", *args)
-        self.tool("alerts", "add", "--from-plan", now=False)
+        if side == "sell" and fq and fp and float(fq) > 0:
+            self.record_fill({"symbol": sym, "side": "sell"}, "sell", fq, fp)
+        if side == "buy":
+            self.tool("alerts", "add", "--from-plan", now=False)
         legs = {l.get("type"): l.get("id") for l in (filled.get("legs") or [])}
-        trade = {"symbol": sym, "status": "open" if fq and float(fq) > 0 else "pending", "order_id": oid,
+        trade = {"symbol": sym, "side": side, "status": "open" if fq and float(fq) > 0 else "pending", "order_id": oid,
                  "client_order_id": coid, "at": self.ny().strftime("%H:%M"), "qty": float(order["qty"]),
                  "plan": c.get("plan"), "tm": {k: v for k, v in (c.get("tm") or {}).items() if k != "bands"},
                  "max_loss": order["plan"]["max_loss"], "strategy_version": int(self.ap.get("strategy_version", 1)),
@@ -690,6 +876,7 @@ class Pilot:
                  "fill_price": float(fp) if fp else None,
                  "fill_recorded": bool(fq and float(fq) > 0), "legs": legs, "exit_price": None, "pnl": None}
         trade["date"] = self.state["date"]
+        trade["in_play"] = sym in {r.get("symbol") for r in self.state.get("in_play") or []}
         trade["stop_log"] = [[trade["at"], plan["stop"]]]
         trade["or"] = (c["stages"].get("entry") or {}).get("opening_range")
         trade["entry_bar"] = int(((c["stages"].get("entry") or {}).get("trigger") or {}).get("bar_index", 0))
@@ -697,10 +884,11 @@ class Pilot:
             self.start_trailing(trade)
         self.state["trades"].append(trade)
         c["result"] = "ORDER PLACED"
-        self.ok(c, "broker", "bracket buy %s %s sent to Alpaca paper (id %s…), filled %s @ %s" % (
-            order["qty"], sym, oid[:8], fq or "-", fp or "-"))
-        self.event("trade", "BUY %s %s (paper) entry %.2f stop %.2f target %.2f, filled %s @ %s" % (
-            order["qty"], sym, plan["entry"], plan["stop"], plan["target"], fq or "-", fp or "-"),
+        self.ok(c, "broker", "bracket %s %s %s sent to Alpaca paper (id %s…), filled %s @ %s" % (
+            "buy" if side == "buy" else "short", order["qty"], sym, oid[:8], fq or "-", fp or "-"))
+        self.event("trade", "%s %s %s (paper) entry %.2f stop %.2f target %.2f, filled %s @ %s" % (
+            "BUY" if side == "buy" else "SHORT", order["qty"], sym, plan["entry"], plan["stop"], plan["target"],
+            fq or "-", fp or "-"),
             order_id=oid)
 
     # ------------------------------------------------------------ while it is open
@@ -721,7 +909,7 @@ class Pilot:
                 continue
             fq, fp = float(o.get("filled_qty") or 0), o.get("filled_avg_price")
             if fq > 0 and not t.get("fill_recorded"):
-                self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "buy", "--qty", fq, "--price", fp)
+                self.record_fill(t, t.get("side", "buy"), fq, fp)
                 t.update(fill_recorded=True, fill_price=float(fp), status="open", qty=fq)
                 if t.get("exit_mode") in fx.TRAILING and not t.get("target_cap"):
                     self.start_trailing(t)
@@ -732,10 +920,12 @@ class Pilot:
             for leg in legs:
                 if leg.get("status") == "filled" and leg["id"] not in t.setdefault("legs_recorded", []):
                     q, p = float(leg["filled_qty"]), float(leg["filled_avg_price"])
-                    self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "sell", "--qty", q, "--price", p)
+                    self.record_fill(t, "sell" if t.get("side", "buy") == "buy" else "buy", q, p)
                     t["legs_recorded"].append(leg["id"])
+                    sgn = 1 if t.get("side", "buy") == "buy" else -1
                     how = "target" if leg.get("type") == "limit" else \
-                        ("trail" if t.get("exit_mode") in fx.TRAILING and p > (t.get("fill_price") or p) else "stop")
+                        ("trail" if t.get("exit_mode") in fx.TRAILING and sgn * (p - (t.get("fill_price") or p)) > 0
+                         else "stop")
                     self.close_trade(t, p, how, qty=q)
                     break
             if t.get("status") == "open" and t.get("fill_recorded"):
@@ -754,7 +944,10 @@ class Pilot:
             self.event("warn", "%s: no ATR (%s)" % (t["symbol"], str(e)[:80]))
         if not t.get("fill_price") or not plan.get("risk_per_share"):
             return
-        cap = round(t["fill_price"] + float(self.ap.get("trail_cap_R", 10)) * plan["risk_per_share"], 2)
+        sgn = 1 if t.get("side", "buy") == "buy" else -1
+        cap = round(t["fill_price"] + sgn * float(self.ap.get("trail_cap_R", 10)) * plan["risk_per_share"], 2)
+        if cap <= 0:
+            cap = 0.01
         tp = t.get("legs", {}).get("limit")
         try:
             if tp:
@@ -778,13 +971,16 @@ class Pilot:
         after = [D[i] for i in sorted(D) if i > t.get("entry_bar", 0)]
         if not after:
             return
-        high = max([t["fill_price"]] + [b["h"] for b in after])
+        side = t.get("side", "buy")
+        sgn = 1 if side == "buy" else -1
+        high = max([t["fill_price"]] + [b["h"] for b in after]) if side == "buy" else \
+            min([t["fill_price"]] + [b["l"] for b in after])
         cur = t.get("stop_now") or plan["stop"]
-        new = fx.trail_level(t["exit_mode"], t["fill_price"], cur, plan["risk_per_share"], high,
-                             t.get("atr"), float(t.get("exit_atr_k", 2.0)))
+        new = fx.trail_level_side(side, t["exit_mode"], t["fill_price"], cur, plan["risk_per_share"], high,
+                                  t.get("atr"), float(t.get("exit_atr_k", 2.0)))
         last = after[-1]["c"]
-        if new <= cur + 0.004 or new >= last:
-            return   # nothing to do, or the stop would sit at/above the market (it would fill at once)
+        if sgn * (new - cur) <= 0.004 or sgn * (new - last) >= 0:
+            return   # nothing to do, or the stop would sit at/through the market (it would fill at once)
         stop_leg = next((l for l in legs if l.get("type") == "stop" and l.get("status") in ("new", "held", "accepted")), None)
         if not stop_leg:
             return
@@ -796,8 +992,9 @@ class Pilot:
         t["stop_now"] = new
         t.setdefault("trail_log", []).append([self.ny().strftime("%H:%M"), new])
         t.setdefault("stop_log", []).append([self.ny().strftime("%H:%M"), new])
-        self.event("trade", "%s: trailing stop %.2f -> %.2f (high %.2f, %+.2fR locked)" % (
-            t["symbol"], cur, new, high, (new - t["fill_price"]) / plan["risk_per_share"]))
+        self.event("trade", "%s: trailing stop %.2f -> %.2f (%s %.2f, %+.2fR locked)" % (
+            t["symbol"], cur, new, "high" if side == "buy" else "low", high,
+            sgn * (new - t["fill_price"]) / plan["risk_per_share"]))
 
     def manage_exit(self, t, legs):
         """Breakeven / partial exit once the price is exit_at_R x risk above the fill;
@@ -811,11 +1008,14 @@ class Pilot:
         risk, fill = plan.get("risk_per_share"), t.get("fill_price")
         if not risk or not fill:
             return
-        trig = fill + float(t.get("exit_at_R", 1.0)) * risk
+        side = t.get("side", "buy")
+        sgn = 1 if side == "buy" else -1
+        trig = fill + sgn * float(t.get("exit_at_R", 1.0)) * risk
         px = self.broker.latest_trade(t["symbol"])
-        if not px or float(px) < trig:
+        if not px or sgn * (float(px) - trig) < 0:
             return
-        be = round(math.ceil(fill * 100) / 100, 2)
+        be = round((math.ceil(fill * 100) if side == "buy" else math.floor(fill * 100)) / 100, 2)
+        out_side = "sell" if side == "buy" else "buy"
         stop_leg = next((l for l in legs if l.get("type") == "stop" and l.get("status") in ("new", "held", "accepted")), None)
         tp_leg = next((l for l in legs if l.get("type") == "limit" and l.get("status") in ("new", "held", "accepted")), None)
         half = int(t["qty"] // 2)
@@ -824,26 +1024,27 @@ class Pilot:
                 self.broker.cancel(l["id"])
             time.sleep(0 if self.sim else 1.5)
             try:
-                sold = self.broker.submit_raw({"symbol": t["symbol"], "qty": str(half), "side": "sell", "type": "market",
-                                               "time_in_force": "day"})
+                sold = self.broker.submit_raw({"symbol": t["symbol"], "qty": str(half), "side": out_side,
+                                               "type": "market", "time_in_force": "day"}, closing_short=side == "sell")
                 sold = self.broker.wait_fill(sold["id"], seconds=4 if self.sim else 15) or sold
                 rest = t["qty"] - half
-                oco = self.broker.submit_raw({"symbol": t["symbol"], "qty": str(int(rest)), "side": "sell", "type": "limit",
-                                              "time_in_force": "day", "order_class": "oco",
+                oco = self.broker.submit_raw({"symbol": t["symbol"], "qty": str(int(rest)), "side": out_side,
+                                              "type": "limit", "time_in_force": "day", "order_class": "oco",
                                               "take_profit": {"limit_price": "%.2f" % plan["target"]},
-                                              "stop_loss": {"stop_price": "%.2f" % be}})
+                                              "stop_loss": {"stop_price": "%.2f" % be}}, closing_short=side == "sell")
             except AlpacaError as e:
                 self.event("error", "%s: partial exit failed (%s); flatten at %s will close it" % (
                     t["symbol"], e, self.cfg.get("flat_by", "15:55")))
                 t["exit_adjusted"] = "failed"
                 return
             p = float(sold.get("filled_avg_price") or px)
-            self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "sell", "--qty", half, "--price", p)
+            self.record_fill(t, out_side, half, p)
             t["partials"] = t.get("partials", []) + [{"qty": half, "price": p, "at": self.ny().strftime("%H:%M")}]
             t.setdefault("stop_log", []).append([self.ny().strftime("%H:%M"), be])
             t.update(oco_id=oco["id"], exit_adjusted="partial", stop_now=be, qty_open=rest)
-            self.event("trade", "%s: +%.1fR reached, sold %d at %.2f, the rest runs to %.2f with the stop at entry %.2f"
-                       % (t["symbol"], t.get("exit_at_R", 1.0), half, p, plan["target"], be))
+            self.event("trade", "%s: +%.1fR reached, %s %d at %.2f, the rest runs to %.2f with the stop at entry %.2f"
+                       % (t["symbol"], t.get("exit_at_R", 1.0), "sold" if side == "buy" else "covered", half, p,
+                          plan["target"], be))
         elif stop_leg:
             try:
                 self.broker.replace(stop_leg["id"], stop_price="%.2f" % be)
@@ -862,12 +1063,14 @@ class Pilot:
         t["exit_price"] = price
         t["status"] = how
         t["closed_at"] = self.ny().strftime("%H:%M")
-        t["pnl"] = round(sum((p["price"] - fill) * p["qty"] for p in parts) + (price - fill) * rest, 2)
+        sgn = 1 if t.get("side", "buy") == "buy" else -1
+        t["pnl"] = round(sgn * (sum((p["price"] - fill) * p["qty"] for p in parts) + (price - fill) * rest), 2)
         risk = (t.get("plan") or {}).get("risk_per_share")
         t["R"] = round(t["pnl"] / (risk * t["qty"]), 2) if risk and t["qty"] else None
         self.state["realized"] = round(self.state.get("realized", 0) + t["pnl"], 2)
-        self.event("trade", "%s %s closed at %.2f (%s): P&L $%+.2f" % (
-            {"target": "TARGET", "stop": "STOP", "trail": "TRAILING STOP"}.get(how, "FLAT"), t["symbol"], price, how, t["pnl"]))
+        self.event("trade", "%s %s%s closed at %.2f (%s): P&L $%+.2f" % (
+            {"target": "TARGET", "stop": "STOP", "trail": "TRAILING STOP"}.get(how, "FLAT"), t["symbol"],
+            "" if sgn > 0 else " (short)", price, how, t["pnl"]))
 
     # ------------------------------------------------------------ out by the close
     def flatten_all(self):
@@ -892,11 +1095,20 @@ class Pilot:
                 continue
             pos = self.broker.position(sym)
             qty = float((pos or {}).get("qty") or 0)
-            if qty <= 0:
+            short = t.get("side", "buy") == "sell"
+            if (qty >= 0) if short else (qty <= 0):
                 t["status"] = "rejected" if not t.get("fill_recorded") else t["status"]
                 continue
-            self.tool("ticket", "flatten", "--symbol", sym, "--qty", qty)
-            code, js, err = self.tool_json("risk", timeout=60)
+            if short:   # buy to cover: the ticket trader-broker's flatten would build, mirrored
+                cover = {"symbol": sym, "side": "buy", "qty": ticketmod._str_num(abs(qty)), "type": "market",
+                         "time_in_force": "day", "why": "flat by %s New York: covers the %s short before the close"
+                         % (self.cfg.get("flat_by", "15:55"), sym)}
+                wj(os.path.join(T, "orders.json"), shorts.orders_doc(cover, self.now_utc(), note="Cover ticket."))
+                rc = shorts.risk_config(self.cfg, os.path.join(AP, "risk-config-short.json"))
+                code, js, err = self.tool_json("risk", "--config", rc, timeout=60)
+            else:
+                self.tool("ticket", "flatten", "--symbol", sym, "--qty", qty)
+                code, js, err = self.tool_json("risk", timeout=60)
             order = (rj(os.path.join(T, "orders.json"), {}) or {}).get("orders", [{}])[0]
             r = ((js or {}).get("results") or [{}])[0]
             if r.get("verdict") != "PASS":
@@ -913,8 +1125,11 @@ class Pilot:
             fq, fp = done.get("filled_qty"), done.get("filled_avg_price")
             args = ["result", "--index", 1, "--status", "placed", "--broker-id", res["id"]]
             if fq and fp and float(fq) > 0:
-                args += ["--filled-qty", fq, "--filled-price", fp]
+                if not short:
+                    args += ["--filled-qty", fq, "--filled-price", fp]
                 self.tool("ticket", *args)
+                if short:
+                    self.record_fill(t, "buy", fq, fp)
                 self.close_trade(t, float(fp), "flat", qty=float(fq))
             else:
                 self.tool("ticket", *args)
@@ -941,7 +1156,7 @@ class Pilot:
                                                     "flat_by", "min_reward_risk")},
             "autopilot": {k: v for k, v in self.ap.items() if k not in ("sim",)},
             "account": d.get("account"), "positions": d.get("positions", []),
-            "day": {"date": d.get("date"), "symbols": d.get("symbols", []), "funnel": d.get("funnel", {}),
+            "day": {"date": d.get("date"), "symbols": d.get("symbols", []), "in_play": d.get("in_play", []), "funnel": d.get("funnel", {}),
                     "scans": d.get("scans", [])[-30:], "trades": d.get("trades", []), "realized": d.get("realized", 0),
                     "candidates": cands[:60]},
         })
@@ -958,6 +1173,7 @@ def main(argv=None):
         p.add_argument("--sim", action="store_true", help="offline tool files from trader/autopilot.json 'sim'")
         p.add_argument("--broker-url", help="mock broker on 127.0.0.1 (tests only)")
     sub.add_parser("status")
+    sub.add_parser("export", help="write the weekly export zip (no keys, no personal data)")
     sub.add_parser("pause")
     sub.add_parser("resume")
     a = ap.parse_args(argv)
@@ -972,6 +1188,12 @@ def main(argv=None):
         print("autopilot %s: %s" % ("paused" if a.cmd == "pause" else "resumed",
                                     "no new entries; open trades are still managed" if a.cmd == "pause"
                                     else "new entries allowed"))
+        return 0
+    if a.cmd == "export":
+        import export
+        path, man = export.write(ROOT)
+        print("Export geschrieben: %s (%d Handelstage, %d Dateien)" % (path, len(man["days"]), len(man["files"])))
+        print("Schick diese Datei zur Auswertung. Sie enthält keine Schlüssel und keine persönlichen Daten.")
         return 0
     if a.cmd == "status":
         s = rj(os.path.join(AP, "status.json"))

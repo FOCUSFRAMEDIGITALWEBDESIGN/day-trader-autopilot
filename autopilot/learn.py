@@ -34,7 +34,8 @@ T = os.path.join(ROOT, "trader")
 AP = os.path.join(T, "autopilot")
 DATA = os.path.join(ROOT, "tuning", "data")
 
-MIN_TRADES = 25          # stage-2 trades a candidate needs
+MIN_TRADES = 25          # stage-2 trades a candidate needs (x3 on Alpaca's years)
+MIN_TRADES_SHORT_DATA = 40   # ... and on Yahoo's 60 days
 MIN_GAIN_R = 0.03        # lower-bound improvement needed to switch
 LIVE_MIN_TRADES = 15
 LIVE_STOP_R = -0.30
@@ -42,7 +43,7 @@ STAGE2_KEEP = 6
 REPLAYS = 600
 
 # the only keys the learner may change (how setups are chosen and exited, never how much is risked)
-KEYS = ["or_minutes", "last_entry", "max_pct_over", "gap_filter", "rvol_min", "market_filter", "rs_min",
+KEYS = ["sides", "or_minutes", "last_entry", "max_pct_over", "gap_filter", "rvol_min", "market_filter", "rs_min",
         "stop", "target", "exit_mode", "exit_atr_k", "min_volume_x"]
 GRID = {k: None for k in KEYS}
 EDGES = [0.0, 2.0, 5.0]   # tm_min_edge_pts candidates (stage 2)
@@ -146,7 +147,7 @@ def main(argv=None):
     ap_path = os.path.join(T, "autopilot.json")
     cfg = rj(ap_path) or rj(os.path.join(ROOT, "config", "autopilot.json"), {})
     version = int(cfg.get("strategy_version", 1))
-    cur = {"or_minutes": 15, "last_entry": "11:30", "max_pct_over": 0.75, "gap_filter": True, "rvol_min": 0,
+    cur = {"sides": "both", "or_minutes": 15, "last_entry": "11:30", "max_pct_over": 0.75, "gap_filter": True, "rvol_min": 0,
            "market_filter": "none", "rs_min": None, "stop": "or-mid", "target": "2R", "exit_mode": "fixed",
            "min_volume_x": None}
     cur.update({k: cfg[k] for k in KEYS if k in cfg})
@@ -203,7 +204,15 @@ def main(argv=None):
                 results2.append(dict(sm, settings=st, edge=e, label=rsch.describe(st, e),
                                      current=json.dumps(st, sort_keys=True) == ck and e == cur_edge))
     results = results2
-    min_trades = MIN_TRADES * (3 if big else 1)
+    min_trades = MIN_TRADES * 3 if big else MIN_TRADES_SHORT_DATA
+    if not big:
+        # 60 days are one market phase: a falling month makes "short only" look brilliant. The
+        # direction (long / short / both) may only change on years of data.
+        dropped = [r for r in results if r["settings"].get("sides", "long") != cur.get("sides", "long")]
+        results = [r for r in results if r["settings"].get("sides", "long") == cur.get("sides", "long")]
+        if dropped:
+            log("Richtungswechsel (%s) nur mit Jahresdaten: %d Kandidaten mit anderer Richtung nicht zugelassen"
+                % (cur.get("sides", "long"), len(dropped)))
     results.sort(key=lambda r: -(r["lcb"] if r["n"] >= min_trades else -9))
     cur_r = next((r for r in results if r["current"]), {"n": 0, "mean": None, "lcb": None})
     best = next((r for r in results if r["n"] >= min_trades), None)

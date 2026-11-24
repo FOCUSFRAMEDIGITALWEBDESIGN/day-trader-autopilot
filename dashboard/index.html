@@ -147,6 +147,12 @@ td.num, th.num { text-align: right; white-space: nowrap; }
 .chartbtn { padding: 3px 9px; font-size: 12px; }
 @media (max-width: 700px) { .tc-wrap { height: 300px; } .modal { padding: 0; } .modal-box { height: 100%; }
   .modal-box .tc { height: 100%; border-radius: 0; } .modal-box .tc-wrap { flex: 1; height: auto; } .modal-close { top: 6px; right: 6px; } }
+.statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; }
+.stat h3 { font-size: 13px; margin: 0 0 6px; color: var(--ink-2); font-weight: 650; }
+.rbar { position: relative; height: 10px; width: 110px; background: var(--surface-2); border-radius: 3px; display: inline-block; vertical-align: middle; }
+.rbar i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.rbar b { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--axis); }
+tr.few td { color: var(--muted); }
 .disclaimer { color: var(--muted); font-size: 12px; text-align: center; padding: 4px 0 24px; }
 </style>
 </head>
@@ -224,6 +230,16 @@ td.num, th.num { text-align: right; white-space: nowrap; }
   <section class="card">
     <h2>Lernen: Strategie-Anpassung (wöchentlich)</h2>
     <div id="learn"><div class="empty">Noch kein Lernlauf. Er startet automatisch außerhalb der Handelszeit, höchstens einmal pro Woche.</div></div>
+  </section>
+
+  <section class="card" id="statsec">
+    <h2>Statistik: was wirklich funktioniert (alle Paper-Trades)</h2>
+    <div class="grid kpis" id="statkpis" style="margin-bottom:14px"></div>
+    <div class="meta" id="statnote" style="margin-bottom:12px"></div>
+    <div class="statgrid" id="statgroups"></div>
+    <h3 style="font-size:13px;color:var(--ink-2);margin:18px 0 6px">Wo die Kandidaten hängen blieben</h3>
+    <div class="tablewrap"><table><thead><tr><th>Stufe</th><th class="num">gestoppt</th><th>häufigste Gründe</th></tr></thead><tbody id="statfunnel"></tbody></table></div>
+    <div style="margin-top:14px"><a class="chartbtn" href="api/export" style="text-decoration:none;display:inline-block;border:1px solid var(--border);border-radius:8px;color:var(--ink)">⬇ Export-Datei herunterladen (für die Auswertung)</a></div>
   </section>
 
   <section class="card">
@@ -343,14 +359,15 @@ function render(s) {
   // positions
   $("positions").innerHTML = open.length ? open.map(t => {
     const trailing = (t.exit_mode || "").startsWith("trail");
-    const p = t.plan || {}, lo = t.stop_now || p.stop, hi = trailing ? Math.max(t.last || 0, (t.fill_price || p.entry) + 3 * (p.risk_per_share || 1)) : p.target, e = t.fill_price || p.entry, now = t.last || e;
+    const p = t.plan || {}, lo = t.stop_now || p.stop, hi = trailing ? (t.side === "sell" ? Math.min(t.last || 1e9, (t.fill_price || p.entry) - 3 * (p.risk_per_share || 1)) : Math.max(t.last || 0, (t.fill_price || p.entry) + 3 * (p.risk_per_share || 1))) : p.target, e = t.fill_price || p.entry, now = t.last || e;
     const banked = (t.partials || []).reduce((a, x) => a + (x.price - e) * x.qty, 0), openQty = t.qty_open || t.qty;
-    const pnlNow = banked + (now - e) * openQty;
+    const sg = t.side === "sell" ? -1 : 1;
+    const pnlNow = sg * (banked + (now - e) * openQty);
     const span = (hi - lo) || 1, at = (v) => Math.max(0, Math.min(100, 100 * (v - lo) / span));
     const EX = { breakeven: "Stop auf Einstieg ab 1R", partial: "halb bei 1R", trail_r: "Trailing in R-Stufen", trail_atr: "Trailing " + (t.exit_atr_k || 2) + "× ATR" };
     const adj = (t.exit_mode || "").startsWith("trail") ? ` · ${EX[t.exit_mode]}${t.stop_now ? ` · <b class="up">Stop nachgezogen auf ${px(t.stop_now)}</b>` : ""}` : t.exit_adjusted === "partial" ? ` · <b class="up">halb verkauft, Stop auf ${px(t.stop_now)}</b>` : t.exit_adjusted === "breakeven" ? ` · <b class="up">Stop auf Einstieg ${px(t.stop_now)}</b>` : (EX[t.exit_mode] ? ` · Ausstieg: ${EX[t.exit_mode]}` : "");
     TRADES[tradeId({ ...t, date: t.date || day.date })] = { ...t, date: t.date || day.date };
-    return `<div class="pos"><div class="top"><div><button class="chartbtn" data-chart="${esc(tradeId({ ...t, date: t.date || day.date }))}">📈 Chart</button> <span class="sym">${esc(t.symbol)}</span> · ${t.qty_open || t.qty} Stück · seit ${esc(t.at)}${adj}</div>
+    return `<div class="pos"><div class="top"><div><button class="chartbtn" data-chart="${esc(tradeId({ ...t, date: t.date || day.date }))}">📈 Chart</button> <span class="sym">${esc(t.symbol)}</span> <span class="chip ${t.side === "sell" ? "no" : "ok"}">${t.side === "sell" ? "SHORT" : "LONG"}</span> · ${t.qty_open || t.qty} Stück · seit ${esc(t.at)}${adj}</div>
       <div><span class="${cls(pnlNow)}">${usd(pnlNow, true)}</span> · ${t.stop_now && t.stop_now >= e - 0.005 ? "gesichert " + usd((t.stop_now - e) * (t.qty_open || t.qty), true) : "max. Verlust " + usd(t.max_loss)}</div></div>
       <div class="ladder" role="img" aria-label="Kurs ${px(now)} zwischen Stop ${px(lo)} und Ziel ${px(hi)}">
         <div class="line"></div><div class="tick" style="left:${at(e)}%"></div><div class="now" style="left:${at(now)}%" title="aktuell ${px(now)}"></div>
@@ -379,7 +396,7 @@ function render(s) {
       <span class="c-target" style="width:${100 * tm.p_target}%"></span><span class="c-stop" style="width:${100 * tm.p_stop}%"></span><span class="c-neither" style="width:${100 * tm.p_neither}%"></span></div>
       <div class="why">${pct(tm.p_target)} / ${pct(tm.p_stop)} · Edge ${tm.edge_pts > 0 ? "+" : ""}${tm.edge_pts} Pkt · Ø ${tm.avg_R} R${tm.hist?.triggered ? ` · Historie ${tm.hist.triggered}×: Ø ${tm.hist.avg_R} R` : ""}</div>` : "–";
     const res = c.result === "ORDER PLACED" ? `<b class="up">Order platziert</b>` : `<span class="why">${esc(c.why || c.result || "läuft …")}</span>`;
-    return `<tr><td>${esc(c.first_seen)}</td><td class="sym">${esc(c.symbol)}</td><td><div class="stages">${st}</div></td><td class="why">${plan}</td><td>${odds}</td><td>${res}</td></tr>`;
+    return `<tr><td>${esc(c.first_seen)}</td><td class="sym">${esc(c.symbol)}${c.side === "sell" ? ' <span class="chip no">SHORT</span>' : ""}</td><td><div class="stages">${st}</div></td><td class="why">${plan}</td><td>${odds}</td><td>${res}</td></tr>`;
   }).join("") : `<tr><td colspan="6" class="empty">Noch keine Ausbrüche heute.</td></tr>`;
 
   // trades (all days)
@@ -390,7 +407,7 @@ function render(s) {
   done.forEach((t) => { TRADES[tradeId(t)] = t; });
   if (modalChart && TRADES[modalChart.id]) modalChart.update(TRADES[modalChart.id]);
   const HOW = { target: "Ziel", stop: "Stop", trail: "Trailing-Stop", flat: "Flat 15:55", open: "offen", pending: "wartet" };
-  $("trades").innerHTML = done.length ? done.slice(0, 200).map(t => `<tr><td>${esc(t.date)}</td><td>${esc(t.at)}</td><td class="sym">${esc(t.symbol)}</td>
+  $("trades").innerHTML = done.length ? done.slice(0, 200).map(t => `<tr><td>${esc(t.date)}</td><td>${esc(t.at)}</td><td class="sym">${esc(t.symbol)}${t.side === "sell" ? ' <span class="chip no">SHORT</span>' : ""}</td>
     <td class="num">${t.qty}</td><td class="num">${px(t.fill_price)}</td><td class="num">${px(t.plan?.stop)}</td><td class="num">${px(t.plan?.target)}</td>
     <td class="num">${px(t.exit_price)}</td><td>${HOW[t.status] || esc(t.status)}</td><td class="num ${cls(t.R)}">${t.R == null ? "–" : (t.R > 0 ? "+" : "") + t.R}</td>
     <td class="num ${cls(t.pnl)}">${t.pnl == null ? "–" : usd(t.pnl, true)}</td>
@@ -474,6 +491,39 @@ function drawEquity(pts) {
   };
   hit.onmouseleave = () => { tip.style.display = "none"; xh.setAttribute("visibility", "hidden"); xd.setAttribute("visibility", "hidden"); };
 }
+
+const STAGE_DE = { scanner: "Scan", news: "News", entry: "Entry / Filter", exit: "Exit-Plan", timemachine: "Time Machine",
+  budget: "Budget / Preis", limits: "Tageslimits", risk: "Risk", broker: "Order", Order: "→ Order platziert" };
+function rcell(v) {
+  if (v == null) return "–";
+  const w = Math.min(50, Math.abs(v) * 25);
+  return `<span class="rbar" title="${v} R"><b></b><i style="${v >= 0 ? `left:50%;width:${w}%;background:var(--good)` : `right:50%;width:${w}%;background:var(--critical)`}"></i></span> <span class="${cls(v)}">${v > 0 ? "+" : ""}${(+v).toFixed(2)} R</span>`;
+}
+async function loadStats() {
+  let st;
+  try { st = await (await fetch("api/stats", { cache: "no-store" })).json(); } catch (e) { return; }
+  const o = st.overall || {};
+  const k = (l, v, sub) => `<div class="card kpi"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub || ""}</div></div>`;
+  $("statkpis").innerHTML = o.n ? [
+    k("Geschlossene Trades", o.n, `${(st.days || []).length} Handelstage`),
+    k("Trefferquote", o.win_pct + " %", `Ø Gewinn ${usd(o.avg_win)} · Ø Verlust ${usd(o.avg_loss)}`),
+    k("Ø pro Trade", `<span class="${cls(o.avg_R)}">${o.avg_R > 0 ? "+" : ""}${o.avg_R} R</span>`, `${usd(o.per_trade, true)} pro Trade`),
+    k("Summe", `<span class="${cls(o.pnl)}">${usd(o.pnl, true)}</span>`, `Profit-Faktor ${o.profit_factor ?? "–"} · max. Rückgang ${usd(o.max_drawdown)}`),
+    k("Live vs. Backtest", st.vs_backtest == null ? "–" : `<span class="${cls(st.vs_backtest)}">${st.vs_backtest > 0 ? "+" : ""}${st.vs_backtest} R</span>`,
+      st.backtest_expectation_R == null ? "noch kein Lernlauf" : `Backtest erwartete Ø ${st.backtest_expectation_R} R`),
+  ].join("") : `<div class="empty">Noch keine geschlossenen Trades. Die Statistik füllt sich mit jedem Trade.</div>`;
+  $("statnote").textContent = o.n ? `Grau = weniger als ${st.min_n} Trades in der Gruppe: noch kein verlässliches Urteil.` : "";
+  $("statgroups").innerHTML = o.n ? (st.groups || []).map((g) => `<div class="stat"><h3>${esc(g.title)}</h3><div class="tablewrap"><table>
+    <thead><tr><th>Gruppe</th><th class="num">Trades</th><th class="num">Treffer</th><th>Ø R</th><th class="num">P&amp;L</th></tr></thead><tbody>
+    ${g.rows.map((r) => `<tr class="${r.enough ? "" : "few"}"><td>${esc(r.label)}</td><td class="num">${r.n}</td><td class="num">${r.win_pct} %</td><td>${rcell(r.avg_R)}</td><td class="num ${cls(r.pnl)}">${usd(r.pnl, true)}</td></tr>`).join("")}
+    </tbody></table></div></div>`).join("") : "";
+  const fu = st.funnel || {};
+  $("statfunnel").innerHTML = Object.entries(fu.stopped_at || {}).sort((a, b) => b[1] - a[1]).map(([sg, n]) =>
+    `<tr><td>${esc(STAGE_DE[sg] || sg)}</td><td class="num">${n}</td><td class="why">${((fu.top_reasons || {})[sg] || []).map(([w, c]) => esc(w) + " (" + c + ")").join(" · ")}</td></tr>`).join("")
+    || `<tr><td colspan="3" class="empty">Noch keine Kandidaten.</td></tr>`;
+}
+loadStats();
+setInterval(loadStats, 60000);
 
 async function load() {
   try {

@@ -27,6 +27,7 @@ class Dashboard(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
         os.environ.pop("DASHBOARD_CHART_DIR", None)
         shutil.rmtree(cls.d, ignore_errors=True)
 
