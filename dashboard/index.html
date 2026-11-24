@@ -172,7 +172,7 @@ tr.few td { color: var(--muted); }
   <div class="banner" id="err"></div>
 
   <section class="grid kpis">
-    <div class="card kpi"><div class="label">Equity (Paper-Konto)</div><div class="value" id="k-eq">–</div><div class="sub" id="k-eq-sub"></div></div>
+    <div class="card kpi"><div class="label">Simuliertes Konto</div><div class="value" id="k-eq">–</div><div class="sub" id="k-eq-sub"></div></div>
     <div class="card kpi"><div class="label">Realisiert heute</div><div class="value" id="k-real">–</div><div class="sub" id="k-real-sub"></div></div>
     <div class="card kpi"><div class="label">Trades heute</div><div class="value" id="k-trades">–</div><div class="meter"><div id="m-trades" style="width:0"></div></div></div>
     <div class="card kpi"><div class="label">Risiko heute (Verlust an den Stops)</div><div class="value" id="k-risk">–</div><div class="meter" id="m-risk-w"><div id="m-risk" style="width:0"></div></div></div>
@@ -337,8 +337,13 @@ function render(s) {
 
   // KPIs
   const eq = +acct.equity, last = +acct.last_equity;
-  $("k-eq").textContent = usd(eq);
-  $("k-eq-sub").innerHTML = acct.equity ? `<span class="${cls(eq - last)}">${usd(eq - last, true)} heute</span> · Konto ${esc(acct.account_number || "")}` : "keine Verbindung zu Alpaca";
+  const sim = +s.sim_equity, start = +s.start_capital;
+  $("k-eq").textContent = sim ? usd(sim) : usd(eq);
+  $("k-eq-sub").innerHTML = sim
+    ? `<span class="${cls(sim - start)}">${usd(sim - start, true)}</span> seit Start mit ${usd(start)}` +
+      (sim < 2000 ? ` · <b class="down">unter $2.000: kein Short</b>` : "") +
+      `<br>Alpaca-Paper ${acct.equity ? usd(eq) : "nicht verbunden"} · ${esc(acct.account_number || "")}`
+    : (acct.equity ? `<span class="${cls(eq - last)}">${usd(eq - last, true)} heute</span> · Konto ${esc(acct.account_number || "")}` : "keine Verbindung zu Alpaca");
   const real = day.realized || 0;
   $("k-real").innerHTML = `<span class="${cls(real)}">${usd(real, true)}</span>`;
   const closed = (day.trades || []).filter(t => ["target", "stop", "flat", "trail"].includes(t.status));

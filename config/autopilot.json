@@ -83,7 +83,7 @@
  "tm_min_avg_R": 0.0,
  "tm_hist_min_trades": 8,
  "tm_hist_min_avg_R": null,
- "stop_after_daily_loss_usd": 150,
+ "stop_after_daily_loss_usd": 60.0,
  "loop_seconds": 20,
  "scan_delay_seconds": 25,
  "rvol_min": 0,
@@ -118,5 +118,10 @@
  },
  "event_last_entry": "12:00",
  "event_flat_by": "13:55",
- "earnings_action": "skip"
+ "earnings_action": "skip",
+ "short_min_equity": 2000.0,
+ "account_profile": {
+  "capital": 2000.0,
+  "set": "via profile"
+ }
 }

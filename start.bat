@@ -22,6 +22,14 @@ if not exist .env (
   exit /b 0
 )
 
+if not exist trader\autopilot\account.json (
+  if not exist trader mkdir trader
+  if not exist trader\autopilot mkdir trader\autopilot
+  if not exist trader\config.json copy config\config.json trader\config.json >nul
+  if not exist trader\autopilot.json copy config\autopilot.json trader\autopilot.json >nul
+  echo Erster Start nach dem Update: das simulierte Konto wird auf $2.000 eingestellt ^(aendern mit konto.bat^).
+  python autopilot\autopilot.py profile 2000
+)
 call "%~dp0start-silent.bat"
 timeout /t 5 >nul
 start "" http://127.0.0.1:8765

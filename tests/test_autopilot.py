@@ -381,6 +381,28 @@ class AutopilotReel(unittest.TestCase):
         cfg = json.load(open(os.path.join(self.d, "trader", "config.json")))
         self.assertEqual(cfg["no_entries_before"], "09:45")    # the user's rules are unchanged
 
+    def test_account_profile_and_short_minimum(self):
+        env = dict(os.environ, ALPACA_API_KEY="SIM", ALPACA_SECRET_KEY="SIM")
+        p = subprocess.run([sys.executable, os.path.join(self.d, "autopilot", "autopilot.py"), "profile", "2000"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        cfg = json.load(open(os.path.join(self.d, "trader", "config.json")))
+        self.assertEqual((cfg["budget"], cfg["max_loss_per_trade_usd"], cfg["max_daily_loss_usd"], cfg["max_order_usd"]),
+                         (2000.0, 20.0, 60.0, 1500.0))
+        # a past losing day leaves the simulated account at $1,950: no shorts today, longs still trade
+        os.makedirs(os.path.join(self.d, "trader", "autopilot", "days"), exist_ok=True)
+        json.dump({"date": "2026-10-16", "trades": [{"symbol": "X", "status": "stop", "pnl": -50.0, "R": -1}]},
+                  open(os.path.join(self.d, "trader", "autopilot", "days", "2026-10-16.json"), "w"))
+        acc = os.path.join(self.d, "trader", "autopilot", "account.json")
+        a = json.load(open(acc)); a["since"] = "2026-01-01"; json.dump(a, open(acc, "w"))
+        self.short_setup({})
+        st, out = self.tick("2026-10-19 10:15")
+        self.assertEqual(st["sim_equity"], 1950.0)
+        self.assertIn("short selling off today", out)
+        self.assertEqual(st["day"]["candidates"], [])
+        pf = json.load(open(os.path.join(self.d, "trader", "portfolio.json")))
+        self.assertEqual(pf["cash"], 1950.0)
+
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")
         cfg = json.load(open(cfgp)); cfg["paper"] = False; json.dump(cfg, open(cfgp, "w"))

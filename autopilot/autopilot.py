@@ -92,6 +92,7 @@ DEFAULTS = {
     "tm_hist_min_trades": 8,
     "tm_hist_min_avg_R": None,
     "stop_after_daily_loss_usd": None,
+    "short_min_equity": 2000,
     "sides": "both",
     "event_actions": {"fomc": "flat_before", "cpi": "trade", "jobs": "trade"},
     "event_last_entry": "12:00",
@@ -243,7 +244,23 @@ class Pilot:
                           "candidates": {}, "trades": [], "funnel": {}, "scans": [], "realized": 0.0,
                           "flattened": False, "paused": self.state.get("paused", False)}
             self.event("info", "new trading day %s" % today)
+            self.state["sim_equity"] = self.simulated_equity()
         return self.state
+
+    def simulated_equity(self):
+        """The account as if it held only its start capital: start capital (trader/autopilot/account.json,
+        else the budget) plus every realized P&L since the profile was set."""
+        import stats
+        acc = rj(os.path.join(AP, "account.json"), {}) or {}
+        start = float(acc.get("start_capital") or self.cfg.get("budget") or 0)
+        since = acc.get("since", "0000-00-00")
+        try:
+            closed, _, _ = stats.load(AP)
+        except Exception:
+            closed = []
+        today = self.state.get("date")
+        pnl = sum(t["pnl"] for t in closed if (t.get("date") or "") >= since and t.get("date") != today)
+        return round(start + pnl, 2)
 
     def save(self):
         wj(self.state_path, self.state)
@@ -375,7 +392,7 @@ class Pilot:
         # the pack's portfolio.json: the budget's own cash, at most the account's cash
         pf_path = os.path.join(T, "portfolio.json")
         if not self.state.get("portfolio_synced"):
-            budget = float(self.cfg.get("budget") or 0)
+            budget = float(self.state.get("sim_equity") or self.cfg.get("budget") or 0)
             cash = min(budget, float(acct.get("cash") or 0)) if budget else float(acct.get("cash") or 0)
             held = [{"ticker": p["symbol"], "shares": float(p["qty"]),
                      "lots": [{"id": p["symbol"] + "-1", "date": self.state["date"], "shares": float(p["qty"]),
@@ -541,6 +558,13 @@ class Pilot:
                 scanned = js.get("scanned")
             else:
                 note = err
+        eq = float(d.get("sim_equity") or 0) + float(d.get("realized") or 0)
+        if sides in ("short", "both") and eq and eq < float(self.ap.get("short_min_equity", 2000)):
+            if not d.get("short_off_noted"):
+                d["short_off_noted"] = True
+                self.event("info", "short selling off today: the simulated account ($%.2f) is under $%.0f, "
+                           "Alpaca's minimum for shorting" % (eq, float(self.ap.get("short_min_equity", 2000))))
+            sides = "long" if sides == "both" else "none"
         if sides in ("short", "both"):
             try:
                 local = self.ny()
@@ -1310,6 +1334,8 @@ class Pilot:
                                                     "flat_by", "min_reward_risk")},
             "autopilot": {k: v for k, v in self.ap.items() if k not in ("sim",)},
             "account": d.get("account"), "positions": d.get("positions", []),
+            "sim_equity": round(float(d.get("sim_equity") or 0) + float(d.get("realized") or 0), 2),
+            "start_capital": (rj(os.path.join(AP, "account.json"), {}) or {}).get("start_capital") or self.cfg.get("budget"),
             "day": {"date": d.get("date"), "symbols": d.get("symbols", []), "in_play": d.get("in_play", []), "funnel": d.get("funnel", {}),
                     "scans": d.get("scans", [])[-30:], "trades": d.get("trades", []), "realized": d.get("realized", 0),
                     "candidates": cands[:60]},
@@ -1328,6 +1354,8 @@ def main(argv=None):
         p.add_argument("--broker-url", help="mock broker on 127.0.0.1 (tests only)")
     sub.add_parser("status")
     sub.add_parser("export", help="write the weekly export zip (no keys, no personal data)")
+    pp = sub.add_parser("profile", help="scale every limit to the money you will really trade with")
+    pp.add_argument("capital", type=float)
     sub.add_parser("pause")
     sub.add_parser("resume")
     a = ap.parse_args(argv)
@@ -1342,6 +1370,20 @@ def main(argv=None):
         print("autopilot %s: %s" % ("paused" if a.cmd == "pause" else "resumed",
                                     "no new entries; open trades are still managed" if a.cmd == "pause"
                                     else "new entries allowed"))
+        return 0
+    if a.cmd == "profile":
+        import account_profile as prof
+        lim = prof.apply(ROOT, a.capital)
+        print("Konto-Profil $%.0f gesetzt:" % lim["budget"])
+        print("  Risiko pro Trade      $%.2f (1 %%)" % lim["max_loss_per_trade_usd"])
+        print("  Tagesverlust-Grenze   $%.2f (3 %%)" % lim["max_daily_loss_usd"])
+        print("  größte Position       $%.2f (75 %%)" % lim["max_order_usd"])
+        print("  Short                 %s" % ("an, solange das simulierte Konto mindestens $2.000 hat"
+                                             if a.capital >= prof.SHORT_MIN_EQUITY else "aus (unter $2.000)"))
+        print("Das simulierte Konto startet neu bei $%.0f. Bot neu starten (stop.bat, start.bat)." % lim["budget"])
+        st = rj(os.path.join(AP, "account.json"), {}) or {}
+        st.update({"start_capital": lim["budget"], "since": datetime.date.today().isoformat()})
+        wj(os.path.join(AP, "account.json"), st)
         return 0
     if a.cmd == "export":
         import export

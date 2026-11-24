@@ -84,6 +84,14 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Realistisches Konto ($2.000)
+
+Das Alpaca-Paper-Konto hat $100.000, der Bot handelt aber so, als hätte er nur das Geld, mit dem du später
+wirklich handeln willst (Standard **$2.000**, ändern mit `konto.bat`): 1 % Risiko pro Trade ($20), 3 %
+Tagesverlust ($60), größte Position 75 % ($1.500). Das **simulierte Konto** (Start + alle Gewinne und Verluste)
+steht oben im Dashboard. Fällt es unter **$2.000**, handelt der Bot an dem Tag **nur Long**, weil Alpaca
+Leerverkäufe erst ab $2.000 erlaubt.
+
 ## Zuverlässig auf dem PC, Telegram, Einstieg, Ereignisse, zweites Setup
 
 - **Wächter:** `start.bat` startet einen Wächter, der Bot und Dashboard nach Abstürzen neu startet, nur eine Kopie
