@@ -141,7 +141,27 @@ def mirror(bars):
     return [mirror_bar(b) for b in bars]
 
 
+class Bar:
+    """A compact 5-minute bar (about a fifth of a dict's memory) that reads like one: b["c"]."""
+    __slots__ = ("o", "h", "l", "c", "v")
+
+    def __init__(self, o, h, l, c, v):
+        self.o, self.h, self.l, self.c, self.v = o, h, l, c, v
+
+    def __getitem__(self, k):
+        return getattr(self, k)
+
+    def get(self, k, default=None):
+        return getattr(self, k, default)
+
+
+def compact(bar):
+    return Bar(bar["o"], bar["h"], bar["l"], bar["c"], bar.get("v", 0))
+
+
 def mirror_bar(b):
+    if isinstance(b, Bar):
+        return Bar(-b.o, -b.l, -b.h, -b.c, b.v)
     return {**b, "o": -b["o"], "h": -b["l"], "l": -b["h"], "c": -b["c"]}
 
 

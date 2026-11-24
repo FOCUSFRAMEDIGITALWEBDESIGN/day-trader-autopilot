@@ -62,6 +62,19 @@ richtet den Dienst ein und zeigt am Ende den **Dashboard-Link** (mit Passwort, a
 - Laufen auf dem Server schon ein Webserver auf Port 80/443 (nginx/Apache), zeigt das Skript die Zeile, die du
   dort für die Weiterleitung einträgst.
 
+## Nur über einen Cloudflare-Tunnel (empfohlen, wenn du schon cloudflared nutzt)
+
+```bash
+sudo bash /opt/day-trader-autopilot/deploy/install-server.sh --tunnel
+```
+
+```bash
+pm2 start cloudflared --name trader-tunnel -- tunnel --no-autoupdate --url http://localhost:8765 && pm2 save
+```
+
+Das Dashboard lauscht dann nur intern (127.0.0.1), kein Port ist offen. Ändert sich die Tunnel-Adresse
+(nach einem Neustart), schickt dir der Bot die neue per Telegram, auch die anderer Tunnel auf dem Server.
+
 ## Bedienen
 
 | Was | Befehl |

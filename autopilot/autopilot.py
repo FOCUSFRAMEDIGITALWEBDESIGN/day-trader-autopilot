@@ -58,6 +58,7 @@ import shorts  # noqa: E402
 import inplay  # noqa: E402
 import notify  # noqa: E402
 import events  # noqa: E402
+import tunnels  # noqa: E402
 scanmod = _mod("ap_scan", TOOLS["scan"])
 ticketmod = _mod("ap_ticket", TOOLS["ticket"])
 
@@ -126,6 +127,19 @@ DEFAULTS = {
 
 
 # ---------------------------------------------------------------- small helpers
+
+def memory_mb():
+    """(total, available) RAM in MB on Linux, (None, None) elsewhere."""
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":", 1)
+                info[k] = int(v.split()[0]) // 1024
+        return info.get("MemTotal"), info.get("MemAvailable")
+    except (OSError, ValueError):
+        return None, None
+
 
 def rj(path, default=None):
     try:
@@ -314,6 +328,10 @@ class Pilot:
             self.last_error = "%s: %s" % (type(e).__name__, e)
             self.event("error", self.last_error, trace=traceback.format_exc()[-1500:])
         try:
+            self.watch_tunnels()
+        except Exception as e:
+            self.last_error = "tunnel check: %s" % str(e)[:80]
+        try:
             self.maybe_learn(phase, mins)
         except Exception as e:
             self.event("error", "learner could not start: %s" % e)
@@ -339,15 +357,49 @@ class Pilot:
         notify.send("\n".join(lines))
 
     # ------------------------------------------------------------ weekly learning
+    def watch_tunnels(self, force=False):
+        """Every 10 minutes: the public dashboard addresses of this server's quick tunnels. A new
+        address (after a restart) goes to Telegram, with your dashboard password for the bot's own."""
+        if (self.sim or self.fixed_now) and not force:
+            return
+        now = time.time()
+        if not force and now - getattr(self, "_tunnel_check", 0) < 600:
+            return
+        self._tunnel_check = now
+        hosts = tunnels.hostnames()
+        if not hosts:
+            return
+        ours, others = tunnels.classify(hosts)
+        path = os.path.join(AP, "tunnels.json")
+        old = rj(path, {}) or {}
+        new = {"ours": ours, "others": sorted(others)}
+        if new == {"ours": old.get("ours"), "others": old.get("others", [])}:
+            return
+        wj(path, dict(new, checked=self.ny().strftime("%Y-%m-%d %H:%M")))
+        token = os.environ.get("DASHBOARD_TOKEN", "")
+        lines = ["🔗 Neue Dashboard-Adressen:"]
+        if ours:
+            lines.append("Day Trader: https://%s/%s" % (ours, ("?token=" + token) if token else ""))
+        for h in others:
+            lines.append("Anderer Bot: https://%s" % h)
+        self.event("info", "Tunnel-Adresse(n) neu: %s" % ", ".join(([ours] if ours else []) + others))
+        notify.send("\n".join(lines))
+
     def maybe_learn(self, phase, mins):
-        """Start autopilot/learn.py outside trading hours, at most once every 6.5 days."""
+        """Start autopilot/learn.py after the US close or on a closed day, at most once every 6.5 days,
+        at low priority and with a memory cap, so it never slows the trading or a neighbour on the server."""
         if self.sim or self.fixed_now or not self.ap.get("learn_weekly", True):
             return
         proc = getattr(self, "_learn_proc", None)
-        if proc is not None and proc.poll() is None:
-            return
-        quiet = phase in ("after close", "closed") or (phase == "premarket" and mins < 8 * 60 + 30)
-        if not quiet:
+        if proc is not None:
+            code = proc.poll()
+            if code is None:
+                return
+            self._learn_proc = None
+            if code != 0:
+                self.event("error", "Lernlauf abgebrochen (Code %s), siehe trader/autopilot/learn.log. "
+                           "Der aktuelle Plan bleibt unverändert." % code)
+        if phase not in ("after close", "closed"):
             return
         hist = rj(os.path.join(AP, "learning.json"), []) or []
         last = self.state.get("learn_started") or (hist[-1].get("run_at") if hist else None)
@@ -359,11 +411,27 @@ class Pilot:
             except ValueError:
                 pass
         self.state["learn_started"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        total, avail = memory_mb()
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        if avail and avail < 1500:
+            env["LEARN_YEARS"] = "1"   # little free memory: one year of history instead of two
+        limit = int(min(total * 0.5, 3072) * 1024 * 1024) if total else None
+
+        def lower():   # POSIX only: low CPU priority and a hard memory ceiling for the learner
+            try:
+                os.nice(15)
+                if limit:
+                    import resource
+                    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+            except Exception:
+                pass
         log = open(os.path.join(AP, "learn.log"), "a", encoding="utf-8")
         self._learn_proc = subprocess.Popen([PY, os.path.join(ROOT, "autopilot", "learn.py")], cwd=ROOT,
-                                            stdout=log, stderr=subprocess.STDOUT,
-                                            env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8"))
-        self.event("info", "Lernen gestartet: neue Daten laden und Strategie prüfen (dauert einige Minuten)")
+                                            stdout=log, stderr=subprocess.STDOUT, env=env,
+                                            preexec_fn=lower if os.name != "nt" else None)
+        self.event("info", "Lernen gestartet (niedrige Priorität%s%s): neue Daten laden und Strategie prüfen" % (
+            ", max. %d MB" % (limit // 1048576) if limit else "",
+            ", 1 Jahr Daten (wenig freier Speicher)" if env.get("LEARN_YEARS") else ""))
 
     # ------------------------------------------------------------ account
     def sync_account(self):
@@ -556,6 +624,8 @@ class Pilot:
             if js:
                 hits += [dict(h, side="buy") for h in js.get("hits", [])]
                 scanned = js.get("scanned")
+                if not js.get("scanned") and js.get("failed"):
+                    note = "Yahoo: %s of %s charts failed" % (js.get("failed"), js.get("universe") or "?")
             else:
                 note = err
         eq = float(d.get("sim_equity") or 0) + float(d.get("realized") or 0)
@@ -574,12 +644,26 @@ class Pilot:
                                                   offline=os.path.join(ROOT, off) if off else None)
                 hits += [dict(h, side="sell") for h in sh]
                 scanned = max(scanned or 0, n_sc)
+                if not n_sc and su["symbols"] and not note:
+                    note = "short scan: no usable chart for %d symbols" % len(su["symbols"])
             except Exception as e:
                 note = "short scan: %s" % str(e)[:120]
         d["scans"].append({"t": self.ny().strftime("%H:%M"), "setup": su["name"], "scanned": scanned, "hits": len(hits),
                            "long": sum(1 for h in hits if h["side"] == "buy"),
                            "short": sum(1 for h in hits if h["side"] == "sell"), "note": note})
         d["scans"] = d["scans"][-100:]
+        # the data source: three failed scans in a row means Yahoo is blocking or down
+        if note and not hits:
+            d["data_fail"] = d.get("data_fail", 0) + 1
+            if d["data_fail"] == 3:
+                self.last_error = "Kursdaten: 3 Scans hintereinander ohne Daten (%s)" % str(note)[:120]
+                self.event("error", "Kursdaten (Yahoo) liefern seit 3 Scans nichts: %s. Der Bot findet so keine "
+                           "Setups; offene Trades sichert Alpaca weiter." % str(note)[:160])
+        else:
+            if d.get("data_fail", 0) >= 3:
+                self.event("info", "Kursdaten sind wieder da.")
+                self.last_error = None
+            d["data_fail"] = 0
         fresh = []
         for h in hits:
             sym = h["symbol"]

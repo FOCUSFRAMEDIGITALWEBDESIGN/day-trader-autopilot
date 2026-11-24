@@ -154,7 +154,7 @@ def main(argv=None):
     cur["min_volume_x"] = None
     cur_edge = float(cfg.get("tm_min_edge_pts", 0.0))
     symbols = [s.upper() for s in cfg.get("symbols", [])] or open(os.path.join(ROOT, "tuning", "universe.txt")).read().split()
-    years = float(cfg.get("learn_years", 2))
+    years = float(os.environ.get("LEARN_YEARS") or cfg.get("learn_years", 2))
     record = {"run_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "strategy_version": version,
               "current": rsch.describe(cur, cur_edge), "changed": False}
 

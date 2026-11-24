@@ -4,6 +4,7 @@
 #   sudo bash deploy/install-server.sh                                # dashboard on http://SERVER-IP:8765
 #   sudo bash deploy/install-server.sh --domain trading.example.de    # HTTPS via Caddy (ports 80/443 must be free)
 #   sudo bash deploy/install-server.sh --port 8877                    # another dashboard port
+#   sudo bash deploy/install-server.sh --tunnel                       # only via a cloudflared tunnel (no open port)
 #
 # What it does (it never touches other services):
 #   - a system user "daytrader" that owns only this folder
@@ -19,12 +20,14 @@ as_user() { local u="$1"; shift; if command -v sudo >/dev/null 2>&1; then sudo -
 
 PORT=8765
 DOMAIN=""
+TUNNEL=0
 SERVICE=day-trader-autopilot
 RUN_USER=daytrader
 while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --domain) DOMAIN="$2"; shift 2 ;;
+    --tunnel) TUNNEL=1; shift ;;
     *) echo "unbekannte Option: $1"; exit 2 ;;
   esac
 done
@@ -82,7 +85,7 @@ if [ ${#TOKEN} -lt 16 ]; then   # a random dashboard password, 32 characters
   setv DASHBOARD_TOKEN "$("$PY" -c 'import secrets; print(secrets.token_urlsafe(24))')"
   TOKEN="$(getv DASHBOARD_TOKEN)"
 fi
-if [ -n "$DOMAIN" ]; then setv DASHBOARD_HOST 127.0.0.1; else setv DASHBOARD_HOST 0.0.0.0; fi
+if [ -n "$DOMAIN" ] || [ "$TUNNEL" = 1 ]; then setv DASHBOARD_HOST 127.0.0.1; else setv DASHBOARD_HOST 0.0.0.0; fi
 setv PORT "$PORT"
 chmod 600 "$APP/.env"
 chown -R "$RUN_USER":"$RUN_USER" "$APP"
@@ -121,7 +124,13 @@ echo "läuft"
 
 say "6/6 Dashboard erreichbar machen"
 URL=""
-if [ -n "$DOMAIN" ]; then
+if [ "$TUNNEL" = 1 ]; then
+  if command -v ufw >/dev/null 2>&1; then ufw delete allow "$PORT"/tcp >/dev/null 2>&1 || true; fi
+  echo "Nur über den Tunnel erreichbar (kein offener Port). Tunnel starten, z. B. mit pm2:"
+  echo "  pm2 start cloudflared --name trader-tunnel -- tunnel --no-autoupdate --url http://localhost:$PORT && pm2 save"
+  echo "Die Adresse schickt dir der Bot per Telegram, sobald Telegram eingerichtet ist."
+  URL="https://DEINE-TUNNEL-ADRESSE.trycloudflare.com/?token=$TOKEN"
+elif [ -n "$DOMAIN" ]; then
   if ss -ltn | grep -qE ':(80|443)\s' && ! systemctl is-active --quiet caddy 2>/dev/null; then
     echo "Ports 80/443 sind schon belegt (ein anderer Webserver). Trag dort diese Weiterleitung ein:"
     echo "  nginx:  location / { proxy_pass http://127.0.0.1:$PORT; proxy_set_header Host \$host; }"

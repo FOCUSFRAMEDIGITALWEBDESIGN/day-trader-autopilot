@@ -403,6 +403,15 @@ class AutopilotReel(unittest.TestCase):
         pf = json.load(open(os.path.join(self.d, "trader", "portfolio.json")))
         self.assertEqual(pf["cash"], 1950.0)
 
+    def test_data_outage_is_reported(self):
+        self.autopilot({"target": "1R"})
+        apf = os.path.join(self.d, "trader", "autopilot.json")
+        ap = json.load(open(apf)); ap["sim"]["scan"] = "tests/fixtures/missing-file.json"; json.dump(ap, open(apf, "w"))
+        for t in ("10:00", "10:05", "10:10"):
+            st, out = self.tick("2026-10-19 " + t)
+        self.assertIn("Kursdaten (Yahoo) liefern seit 3 Scans nichts", out)
+        self.assertIn("Kursdaten", st["last_error"])
+
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")
         cfg = json.load(open(cfgp)); cfg["paper"] = False; json.dump(cfg, open(cfgp, "w"))

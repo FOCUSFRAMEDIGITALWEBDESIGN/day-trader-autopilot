@@ -45,7 +45,8 @@ def load_dir(pattern):
         except Exception:
             continue
         if len(S) >= 40:
-            out[sym] = S
+            # compact bars: years of 5-minute data must fit next to other services on a small server
+            out[sym] = [(d, [fx.compact(b) for b in D]) for d, D in S]
     return out
 
 
