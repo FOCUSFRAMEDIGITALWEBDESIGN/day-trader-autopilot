@@ -309,6 +309,11 @@ class Pilot:
                     if not d["premarket_done"]:
                         self.premarket()
                     self.monitor()
+                    flag = os.path.join(AP, "FLATTEN_NOW")
+                    if os.path.exists(flag):          # /flat from Telegram: close everything now
+                        os.remove(flag)
+                        self.event("trade", "Glattstellen auf Befehl (Telegram): alle offenen Positionen werden geschlossen")
+                        self.flatten_all()
                     if mins >= flat_m:
                         phase = "flatten"
                         self.flatten_all()

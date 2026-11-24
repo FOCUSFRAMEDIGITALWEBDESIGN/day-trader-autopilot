@@ -88,6 +88,14 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Steuerung über Telegram
+
+Mit eingerichtetem Telegram (`telegram-setup.bat` auf dem PC, auf dem Server
+`sudo -u daytrader python3 autopilot/notify.py setup TOKEN`) läuft neben dem Bot ein Telegram-Steuer-Bot, der nur
+deinem eigenen Chat antwortet: `/status`, `/positionen`, `/trades`, `/kandidaten`, `/statistik`, `/lernen`,
+`/pause`, `/weiter`, `/flat` (alles schließen, mit Rückfrage), `/export` (Wochen-Datei als Dokument), `/link`,
+`/konto 2500`, `/hilfe`. Freitags nach US-Börsenschluss kommt der Export von selbst. Das Dashboard bleibt optional.
+
 ## Realistisches Konto ($2.000)
 
 Das Alpaca-Paper-Konto hat $100.000, der Bot handelt aber so, als hätte er nur das Geld, mit dem du später

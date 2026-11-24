@@ -114,6 +114,8 @@ def main():
     logs = {}
     cmds = {"dashboard": [PY, os.path.join(ROOT, "dashboard", "server.py"), "--host", host, "--port", port],
             "autopilot": [PY, os.path.join(ROOT, "autopilot", "autopilot.py"), "run"]}
+    if notify.enabled():   # Telegram control: only when token and chat id are set
+        cmds["telegram"] = [PY, os.path.join(ROOT, "autopilot", "telegram_bot.py")]
     procs, backoff, stopping, started = {}, {k: 5 for k in cmds}, [], {}
     awake = KeepAwake()
 
@@ -136,7 +138,7 @@ def main():
         spawn(name)
         log("started %s (pid %d)%s" % (name, procs[name].pid,
                                          " on http://%s:%s" % (host, port) if name == "dashboard" else ""))
-    notify.send("🟢 Day Trader Autopilot gestartet (Paper). Dashboard: http://%s:%s" % (host, port))
+    notify.send("🟢 Day Trader Autopilot gestartet (Paper). Befehle: /hilfe")
     last_awake_check = 0
     while not stopping:
         time.sleep(2)
@@ -153,7 +155,7 @@ def main():
                     backoff[name] = 5          # it ran a while: start the backoff over
                 log("%s exited with %s, restarting in %ds" % (name, code, backoff[name]))
                 notify.send("⚠️ %s ist abgestürzt (Code %s) und wird in %d s neu gestartet." % (
-                    "Der Autopilot" if name == "autopilot" else "Das Dashboard", code, backoff[name]), key="crash-" + name)
+                    {"autopilot": "Der Autopilot", "dashboard": "Das Dashboard"}.get(name, "Der Telegram-Bot"), code, backoff[name]), key="crash-" + name)
                 time.sleep(backoff[name])
                 backoff[name] = min(backoff[name] * 2, 300)
                 spawn(name)

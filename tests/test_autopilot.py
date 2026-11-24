@@ -412,6 +412,17 @@ class AutopilotReel(unittest.TestCase):
         self.assertIn("Kursdaten (Yahoo) liefern seit 3 Scans nichts", out)
         self.assertIn("Kursdaten", st["last_error"])
 
+    def test_flat_command_from_telegram(self):
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000})
+        self.tick("2026-10-19 10:15")
+        open(os.path.join(self.d, "trader", "autopilot", "FLATTEN_NOW"), "w").close()
+        post("/mock/price", {"TSLA": 365.00})
+        st, out = self.tick("2026-10-19 10:31")
+        self.assertEqual(st["day"]["trades"][0]["status"], "flat")
+        self.assertIn("Glattstellen auf Befehl", out)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "trader", "autopilot", "FLATTEN_NOW")))
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")
         cfg = json.load(open(cfgp)); cfg["paper"] = False; json.dump(cfg, open(cfgp, "w"))
