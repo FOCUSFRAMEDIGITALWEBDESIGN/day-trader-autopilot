@@ -24,6 +24,10 @@ trader-risk muss jede exakte Order mit PASS freigeben, die Time Machine muss ein
 - Keys nur in `.env` / Umgebungsvariablen, nie im Chat, nie im Log.
 - Jede automatische Freigabe steht in `trader/state/broker.json` mit `"approved_by": "autopilot"`.
 
+## Auf einem eigenen Linux-Server
+
+Siehe [DEPLOY-SERVER.md](DEPLOY-SERVER.md): ein Befehl installiert Bot und Dashboard als Dienst (mit HTTPS, wenn du eine Domain hast).
+
 ## In der Cloud (Railway)
 
 Siehe [DEPLOY-RAILWAY.md](DEPLOY-RAILWAY.md): Repository mit Railway verbinden, vier Variablen setzen,

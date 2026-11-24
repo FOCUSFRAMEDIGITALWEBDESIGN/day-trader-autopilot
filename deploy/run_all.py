@@ -109,8 +109,8 @@ def main():
         sys.exit("[run_all] the autopilot is already running (trader/autopilot/run_all.lock): stop it first")
     import notify
     env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-    host = "127.0.0.1" if a.local else "0.0.0.0"
-    port = os.environ.get("DASHBOARD_PORT" if a.local else "PORT") or "8765"
+    host = "127.0.0.1" if a.local else (os.environ.get("DASHBOARD_HOST") or "0.0.0.0")
+    port = os.environ.get("DASHBOARD_PORT" if a.local else "PORT") or os.environ.get("DASHBOARD_PORT") or "8765"
     logs = {}
     cmds = {"dashboard": [PY, os.path.join(ROOT, "dashboard", "server.py"), "--host", host, "--port", port],
             "autopilot": [PY, os.path.join(ROOT, "autopilot", "autopilot.py"), "run"]}
