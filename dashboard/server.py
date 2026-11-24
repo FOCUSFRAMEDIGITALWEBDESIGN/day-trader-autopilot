@@ -134,6 +134,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        if urlparse(self.path).path == "/healthz":      # Railway's health check: no data, no token
+            return self._send(200, b"ok", "text/plain")
         if not self._authed():
             return self._send(401, b"token required: open /?token=YOUR_DASHBOARD_TOKEN", "text/plain")
         p = urlparse(self.path).path

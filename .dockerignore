@@ -1,0 +1,10 @@
+.git
+.env
+trader/
+tuning/data/
+tuning/data_alpaca/
+tuning/data_export/
+docs/
+__pycache__/
+*.pyc
+*.zip
