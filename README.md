@@ -79,6 +79,15 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Trade-Fenster (Charts wie bei TradingView)
+
+Für jeden offenen Trade erscheint im Dashboard ein eigenes Chart-Fenster, live aktualisiert: Kerzen
+(1 oder 5 Minuten), Volumen, Opening Range, die grüne Ziel- und rote Risikozone wie beim
+„Long Position“-Werkzeug von TradingView, der Stop als Treppenlinie (jedes Nachziehen sichtbar),
+Kauf-, Teilverkauf- und Ausstiegs-Pfeile sowie P&L in $ und R. Jeder frühere Trade lässt sich über
+📈 in der Trade-Tabelle als großes Fenster öffnen. Gezeichnet mit TradingView Lightweight Charts™
+(Apache 2.0, liegt in `dashboard/vendor/`, funktioniert ohne Internet); die Kerzen kommen von Yahoo.
+
 ## Selbst lernen (wöchentlich)
 
 Einmal pro Woche außerhalb der Handelszeit startet der Autopilot `autopilot/learn.py` von selbst

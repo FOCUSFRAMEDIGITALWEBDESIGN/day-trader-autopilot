@@ -8,7 +8,7 @@ It reads the files the autopilot writes in trader/autopilot/ (it never needs the
 Alpaca keys) and offers one control: pause / resume new entries.
 If DASHBOARD_TOKEN is set, every request needs ?token=... once (it is then kept in a cookie).
 """
-import argparse, json, os, sys
+import argparse, calendar, datetime, gzip, importlib.util, json, os, re, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -16,6 +16,56 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AP = os.path.join(ROOT, "trader", "autopilot")
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.environ.get("DASHBOARD_TOKEN")
+CHART_DIR = os.environ.get("DASHBOARD_CHART_DIR")   # tests / replays: saved Yahoo chart files, <SYM>.json(.gz)
+_CACHE, _LOCK = {}, threading.Lock()
+
+
+def _mod(name, rel):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, rel))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+entrymod = _mod("dash_entry", "trader-entry/entry.py")
+
+
+def chart(symbol, date, interval="5m"):
+    """Regular-session candles of one symbol on one New York date, for the chart window.
+    Times are New York wall-clock seconds (what the chart shows), not UTC."""
+    if not re.match(r"^[A-Z][A-Z.\-]{0,9}$", symbol) or not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise ValueError("bad symbol or date")
+    if interval not in ("1m", "5m"):
+        interval = "5m"
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    today = entrymod.to_eastern(now).date().isoformat()
+    key = (symbol, date, interval)
+    with _LOCK:
+        hit = _CACHE.get(key)
+    if hit and (date != today or time.time() - hit[0] < 30):
+        return hit[1]
+    if CHART_DIR:
+        text = entrymod.read_text(entrymod.offline_file(CHART_DIR, symbol))
+    else:
+        rng = "1d" if date == today else ("7d" if interval == "1m" else "60d")
+        text = entrymod.yahoo_get(entrymod.chart_path(symbol, rng, interval))
+    ch = entrymod.parse_chart(text, symbol)
+    step = 60 if interval == "1m" else 300
+    bars = []
+    for b in ch["bars"]:
+        if b["t"] % step:
+            continue                       # the live tick is not a candle
+        local = entrymod.to_eastern(datetime.datetime.fromtimestamp(b["t"], datetime.timezone.utc).replace(tzinfo=None))
+        mins = local.hour * 60 + local.minute
+        if local.date().isoformat() != date or not 570 <= mins < 960:
+            continue
+        bars.append({"time": calendar.timegm(local.timetuple()), "open": round(b["o"], 4), "high": round(b["h"], 4),
+                     "low": round(b["l"], 4), "close": round(b["c"], 4), "volume": b["v"]})
+    out = {"symbol": symbol, "date": date, "interval": interval, "bars": bars,
+           "prev_close": ch.get("prev_close") if date == today else None}
+    with _LOCK:
+        _CACHE[key] = (time.time(), out)
+    return out
 
 
 def rj(path, default=None):
@@ -90,6 +140,21 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, f.read(), "text/html; charset=utf-8", cookie=True)
         if p == "/api/state":
             return self._send(200, state())
+        if p == "/api/chart":
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                return self._send(200, chart(q.get("symbol", [""])[0].upper(), q.get("date", [""])[0],
+                                             q.get("interval", ["5m"])[0]))
+            except Exception as e:
+                return self._send(502, {"error": "chart data: %s" % str(e)[:200]})
+        if p == "/tradechart.js":
+            with open(os.path.join(HERE, "tradechart.js"), "rb") as fh:
+                return self._send(200, fh.read(), "application/javascript; charset=utf-8")
+        if p.startswith("/vendor/") and p.count("/") == 2 and p.endswith(".js"):
+            f = os.path.join(HERE, "vendor", os.path.basename(p))
+            if os.path.exists(f):
+                with open(f, "rb") as fh:
+                    return self._send(200, fh.read(), "application/javascript; charset=utf-8")
         self._send(404, {"error": "not found"})
 
     def do_POST(self):

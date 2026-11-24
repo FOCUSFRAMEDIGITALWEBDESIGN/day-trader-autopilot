@@ -689,6 +689,9 @@ class Pilot:
                  "features": c.get("features"),
                  "fill_price": float(fp) if fp else None,
                  "fill_recorded": bool(fq and float(fq) > 0), "legs": legs, "exit_price": None, "pnl": None}
+        trade["date"] = self.state["date"]
+        trade["stop_log"] = [[trade["at"], plan["stop"]]]
+        trade["or"] = (c["stages"].get("entry") or {}).get("opening_range")
         trade["entry_bar"] = int(((c["stages"].get("entry") or {}).get("trigger") or {}).get("bar_index", 0))
         if trade["exit_mode"] in fx.TRAILING:
             self.start_trailing(trade)
@@ -792,6 +795,7 @@ class Pilot:
             return
         t["stop_now"] = new
         t.setdefault("trail_log", []).append([self.ny().strftime("%H:%M"), new])
+        t.setdefault("stop_log", []).append([self.ny().strftime("%H:%M"), new])
         self.event("trade", "%s: trailing stop %.2f -> %.2f (high %.2f, %+.2fR locked)" % (
             t["symbol"], cur, new, high, (new - t["fill_price"]) / plan["risk_per_share"]))
 
@@ -835,7 +839,8 @@ class Pilot:
                 return
             p = float(sold.get("filled_avg_price") or px)
             self.tool("ticket", "fill", "--symbol", t["symbol"], "--side", "sell", "--qty", half, "--price", p)
-            t["partials"] = t.get("partials", []) + [{"qty": half, "price": p}]
+            t["partials"] = t.get("partials", []) + [{"qty": half, "price": p, "at": self.ny().strftime("%H:%M")}]
+            t.setdefault("stop_log", []).append([self.ny().strftime("%H:%M"), be])
             t.update(oco_id=oco["id"], exit_adjusted="partial", stop_now=be, qty_open=rest)
             self.event("trade", "%s: +%.1fR reached, sold %d at %.2f, the rest runs to %.2f with the stop at entry %.2f"
                        % (t["symbol"], t.get("exit_at_R", 1.0), half, p, plan["target"], be))
@@ -847,6 +852,7 @@ class Pilot:
                 t["exit_adjusted"] = "failed"
                 return
             t.update(exit_adjusted="breakeven", stop_now=be)
+            t.setdefault("stop_log", []).append([self.ny().strftime("%H:%M"), be])
             self.event("trade", "%s: +%.1fR reached, stop moved to the entry %.2f" % (t["symbol"], t.get("exit_at_R", 1.0), be))
 
     def close_trade(self, t, price, how, qty=None):

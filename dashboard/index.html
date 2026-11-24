@@ -124,6 +124,29 @@ td.num, th.num { text-align: right; white-space: nowrap; }
   .stages { flex-wrap: wrap; }
   .why { max-width: none; }
 }
+/* trade chart windows (TradingView look) */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); gap: 16px; }
+.tc { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+.tc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--grid); flex-wrap: wrap; }
+.tc-title { font-size: 14px; } .tc-sub { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.tc-badge { font-size: 11px; font-weight: 650; padding: 2px 7px; border-radius: 4px; margin-left: 6px; background: var(--chip-idle-bg); color: var(--ink-2); }
+.tc-badge.open { background: rgba(41,98,255,.15); color: #2962ff; } .tc-badge.win { background: var(--chip-ok-bg); color: var(--good-text); }
+.tc-badge.loss { background: var(--chip-no-bg); color: var(--crit-text); }
+.tc-tools { display: flex; gap: 4px; } .tc-tools button { padding: 3px 9px; font-size: 12px; }
+.tc-tools button.on { background: #2962ff; color: #fff; border-color: transparent; }
+.tc-wrap { position: relative; height: 380px; } .tc-chart { position: absolute; inset: 0; }
+.tc-legend { position: absolute; top: 6px; left: 10px; z-index: 3; font-size: 12px; color: var(--ink-2); pointer-events: none; display: flex; gap: 6px; flex-wrap: wrap; }
+.tc-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; z-index: 2; }
+.tc-foot { display: flex; gap: 6px 18px; flex-wrap: wrap; padding: 8px 12px; border-top: 1px solid var(--grid); font-size: 12px; color: var(--ink-2); }
+.modal { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; padding: 16px; }
+.modal.show { display: flex; }
+.modal-box { width: min(1200px, 100%); max-height: 100%; display: flex; flex-direction: column; position: relative; }
+.modal-box .tc-wrap { height: min(70vh, 620px); }
+.modal-box .tc-head { padding-right: 44px; }
+.modal-close { position: absolute; top: -12px; right: -8px; z-index: 5; border-radius: 50%; width: 32px; height: 32px; padding: 0; }
+.chartbtn { padding: 3px 9px; font-size: 12px; }
+@media (max-width: 700px) { .tc-wrap { height: 300px; } .modal { padding: 0; } .modal-box { height: 100%; }
+  .modal-box .tc { height: 100%; border-radius: 0; } .modal-box .tc-wrap { flex: 1; height: auto; } .modal-close { top: 6px; right: 6px; } }
 .disclaimer { color: var(--muted); font-size: 12px; text-align: center; padding: 4px 0 24px; }
 </style>
 </head>
@@ -162,6 +185,13 @@ td.num, th.num { text-align: right; white-space: nowrap; }
     </div>
   </section>
 
+  <section id="livesec" style="display:none">
+    <div class="card" style="padding-bottom:16px">
+      <h2>Trade-Fenster: offene Trades live</h2>
+      <div class="charts" id="livecharts"></div>
+    </div>
+  </section>
+
   <section class="card">
     <h2>Kandidaten heute: jeder Schritt der Kette</h2>
     <div class="legend"><span><i class="c-target"></i>Ziel zuerst</span><span><i class="c-stop"></i>Stop zuerst</span><span><i class="c-neither"></i>keins bis 15:55</span><span>· Time Machine, 10.000 Replays</span></div>
@@ -185,8 +215,8 @@ td.num, th.num { text-align: right; white-space: nowrap; }
   <section class="card">
     <h2>Trades (alle Tage)</h2>
     <div class="tablewrap"><table>
-      <thead><tr><th>Datum</th><th>Zeit</th><th>Symbol</th><th class="num">Stück</th><th class="num">Einstieg</th><th class="num">Stop</th><th class="num">Ziel</th><th class="num">Ausstieg</th><th>Wie</th><th class="num">R</th><th class="num">P&amp;L</th></tr></thead>
-      <tbody id="trades"><tr><td colspan="11" class="empty">Noch keine Trades.</td></tr></tbody>
+      <thead><tr><th>Datum</th><th>Zeit</th><th>Symbol</th><th class="num">Stück</th><th class="num">Einstieg</th><th class="num">Stop</th><th class="num">Ziel</th><th class="num">Ausstieg</th><th>Wie</th><th class="num">R</th><th class="num">P&amp;L</th><th></th></tr></thead>
+      <tbody id="trades"><tr><td colspan="12" class="empty">Noch keine Trades.</td></tr></tbody>
     </table></div>
     <div class="meta" id="tradesum" style="margin-top:8px"></div>
   </section>
@@ -200,11 +230,55 @@ td.num, th.num { text-align: right; white-space: nowrap; }
     <h2>Einstellungen (trader/config.json + trader/autopilot.json)</h2>
     <div class="cfg" id="cfg"></div>
   </section>
-  <div class="disclaimer">Paper Trading, keine Anlageberatung. Simulierte Quoten der Time Machine sind keine Vorhersage. Daten: Yahoo (inoffiziell, verzögert) und Alpaca Paper.</div>
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Trade-Chart">
+    <div class="modal-box"><button class="modal-close" id="modalclose" aria-label="Schließen">✕</button><div class="tc" id="modalchart"></div></div>
+  </div>
+  <div class="disclaimer">Charts: <a href="https://www.tradingview.com/" target="_blank" rel="noopener" style="color:inherit">TradingView</a> Lightweight Charts™ (Apache 2.0) · Paper Trading, keine Anlageberatung. Simulierte Quoten der Time Machine sind keine Vorhersage. Daten: Yahoo (inoffiziell, verzögert) und Alpaca Paper.</div>
 </main>
 
+<script src="vendor/lightweight-charts.js"></script>
+<script src="tradechart.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
+const TRADES = {};                    // id -> trade, for the chart buttons
+const LIVE = new Map();               // id -> TradeChart of an open trade
+let modalChart = null;
+function openChart(id) {
+  const t = TRADES[id];
+  if (!t || !window.TradeChart) return;
+  if (modalChart) modalChart.destroy();
+  $("modal").classList.add("show");
+  modalChart = new TradeChart($("modalchart"), t, { interval: "5m" });
+  modalChart.id = id;
+}
+function closeChart() { $("modal").classList.remove("show"); if (modalChart) { modalChart.destroy(); modalChart = null; } }
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-chart]");
+  if (b) openChart(b.dataset.chart);
+  if (e.target.id === "modal" || e.target.id === "modalclose") closeChart();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeChart(); });
+function syncLiveCharts(open) {
+  if (!window.TradeChart) return;
+  const ids = new Set(open.map(tradeId));
+  for (const [id, c] of LIVE) if (!ids.has(id)) { c.destroy(); c.host.remove(); LIVE.delete(id); }
+  open.forEach((t) => {
+    const id = tradeId(t);
+    let c = LIVE.get(id);
+    if (!c) {
+      const host = document.createElement("div");
+      host.className = "tc";
+      $("livecharts").appendChild(host);
+      c = new TradeChart(host, t, { interval: "5m" });
+      c.loadedAt = Date.now();
+      LIVE.set(id, c);
+    } else {
+      c.update(t);
+      if (Date.now() - c.loadedAt > 30000) { c.loadedAt = Date.now(); c.load(false); }   // fresh candles every 30 s
+    }
+  });
+  $("livesec").style.display = open.length ? "" : "none";
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const usd = (v, sign) => v == null || isNaN(v) ? "–" : (sign && v > 0 ? "+" : v < 0 ? "−" : "") + "$" + Math.abs(+v).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const px = (v) => v == null ? "–" : (+v).toFixed(2);
@@ -275,7 +349,8 @@ function render(s) {
     const span = (hi - lo) || 1, at = (v) => Math.max(0, Math.min(100, 100 * (v - lo) / span));
     const EX = { breakeven: "Stop auf Einstieg ab 1R", partial: "halb bei 1R", trail_r: "Trailing in R-Stufen", trail_atr: "Trailing " + (t.exit_atr_k || 2) + "× ATR" };
     const adj = (t.exit_mode || "").startsWith("trail") ? ` · ${EX[t.exit_mode]}${t.stop_now ? ` · <b class="up">Stop nachgezogen auf ${px(t.stop_now)}</b>` : ""}` : t.exit_adjusted === "partial" ? ` · <b class="up">halb verkauft, Stop auf ${px(t.stop_now)}</b>` : t.exit_adjusted === "breakeven" ? ` · <b class="up">Stop auf Einstieg ${px(t.stop_now)}</b>` : (EX[t.exit_mode] ? ` · Ausstieg: ${EX[t.exit_mode]}` : "");
-    return `<div class="pos"><div class="top"><div><span class="sym">${esc(t.symbol)}</span> · ${t.qty_open || t.qty} Stück · seit ${esc(t.at)}${adj}</div>
+    TRADES[tradeId({ ...t, date: t.date || day.date })] = { ...t, date: t.date || day.date };
+    return `<div class="pos"><div class="top"><div><button class="chartbtn" data-chart="${esc(tradeId({ ...t, date: t.date || day.date }))}">📈 Chart</button> <span class="sym">${esc(t.symbol)}</span> · ${t.qty_open || t.qty} Stück · seit ${esc(t.at)}${adj}</div>
       <div><span class="${cls(pnlNow)}">${usd(pnlNow, true)}</span> · ${t.stop_now && t.stop_now >= e - 0.005 ? "gesichert " + usd((t.stop_now - e) * (t.qty_open || t.qty), true) : "max. Verlust " + usd(t.max_loss)}</div></div>
       <div class="ladder" role="img" aria-label="Kurs ${px(now)} zwischen Stop ${px(lo)} und Ziel ${px(hi)}">
         <div class="line"></div><div class="tick" style="left:${at(e)}%"></div><div class="now" style="left:${at(now)}%" title="aktuell ${px(now)}"></div>
@@ -312,11 +387,14 @@ function render(s) {
   (s.history || []).forEach(h => (h.trades || []).forEach(t => all.push({ ...t, date: h.date })));
   (day.trades || []).forEach(t => all.push({ ...t, date: day.date }));
   const done = all.filter(t => t.status !== "rejected").reverse();
+  done.forEach((t) => { TRADES[tradeId(t)] = t; });
+  if (modalChart && TRADES[modalChart.id]) modalChart.update(TRADES[modalChart.id]);
   const HOW = { target: "Ziel", stop: "Stop", trail: "Trailing-Stop", flat: "Flat 15:55", open: "offen", pending: "wartet" };
   $("trades").innerHTML = done.length ? done.slice(0, 200).map(t => `<tr><td>${esc(t.date)}</td><td>${esc(t.at)}</td><td class="sym">${esc(t.symbol)}</td>
     <td class="num">${t.qty}</td><td class="num">${px(t.fill_price)}</td><td class="num">${px(t.plan?.stop)}</td><td class="num">${px(t.plan?.target)}</td>
     <td class="num">${px(t.exit_price)}</td><td>${HOW[t.status] || esc(t.status)}</td><td class="num ${cls(t.R)}">${t.R == null ? "–" : (t.R > 0 ? "+" : "") + t.R}</td>
-    <td class="num ${cls(t.pnl)}">${t.pnl == null ? "–" : usd(t.pnl, true)}</td></tr>`).join("") : `<tr><td colspan="11" class="empty">Noch keine Trades.</td></tr>`;
+    <td class="num ${cls(t.pnl)}">${t.pnl == null ? "–" : usd(t.pnl, true)}</td>
+    <td><button class="chartbtn" data-chart="${esc(tradeId(t))}" aria-label="Chart ${esc(t.symbol)}">📈</button></td></tr>`).join("") : `<tr><td colspan="12" class="empty">Noch keine Trades.</td></tr>`;
   const cl = done.filter(t => t.pnl != null);
   if (cl.length) {
     const sum = cl.reduce((a, t) => a + t.pnl, 0), w = cl.filter(t => t.pnl > 0).length;
@@ -363,6 +441,7 @@ function render(s) {
   }
   if (s.pause_reason && /learner/.test(s.pause_reason)) { $("err").style.display = "block"; $("err").textContent = "⏸ " + s.pause_reason; }
 
+  syncLiveCharts(open.map((t) => ({ ...t, date: t.date || day.date })));
   drawEquity(s.equity || []);
 }
 
