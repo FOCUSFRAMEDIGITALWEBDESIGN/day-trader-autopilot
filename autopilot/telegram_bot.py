@@ -143,10 +143,12 @@ def pos_line(t):
     sg = -1 if t.get("side") == "sell" else 1
     fill, last = t.get("fill_price") or p.get("entry"), t.get("last")
     pnl = sg * (last - fill) * (t.get("qty_open") or t.get("qty") or 0) if last and fill else None
+    def px(v):
+        return "–" if v is None else ("%.2f" % float(v)).replace(".", ",")
     return "• %s %s %s Stk @ %s · Stop %s%s · Ziel %s%s" % (
-        t.get("symbol"), side, int(t.get("qty_open") or t.get("qty") or 0), fill, t.get("stop_now") or p.get("stop"),
+        t.get("symbol"), side, int(t.get("qty_open") or t.get("qty") or 0), px(fill), px(t.get("stop_now") or p.get("stop")),
         " (nachgezogen)" if t.get("stop_now") else "", "Trailing" if (t.get("exit_mode") or "").startswith("trail")
-        else p.get("target"), (" · " + usd(pnl, True)) if pnl is not None else "")
+        else px(p.get("target")), (" · " + usd(pnl, True)) if pnl is not None else "")
 
 
 def positions_text():

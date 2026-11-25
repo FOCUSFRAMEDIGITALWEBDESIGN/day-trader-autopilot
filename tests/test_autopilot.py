@@ -423,6 +423,55 @@ class AutopilotReel(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.d, "trader", "autopilot", "FLATTEN_NOW")))
         self.assertNotIn("TSLA", mock_broker.S["positions"])
 
+    def test_flatten_waits_for_slow_cancels_like_alpaca(self):
+        # 2026-11-24, WMT: the bracket's legs were still being canceled, Alpaca held the shares and refused
+        # the closing sell ("insufficient qty available ... held_for_orders 11"); the retry was then blocked.
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000})
+        mock_broker.S["slow_cancel"] = True
+        try:
+            self.tick("2026-10-19 10:15")
+            post("/mock/price", {"TSLA": 366.00})
+            st, out = self.tick("2026-10-19 15:55")
+        finally:
+            mock_broker.S.pop("slow_cancel", None)
+        t = st["day"]["trades"][0]
+        self.assertEqual((t["status"], t["exit_price"]), ("flat", 366.00), out)
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+        self.assertNotIn("refused", out)
+
+    def test_flatten_retries_after_a_failed_exit(self):
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000})
+        self.tick("2026-10-19 10:15")
+        post("/mock/price", {"TSLA": 366.00})
+        mock_broker.S["refuse_next_sell"] = True           # the first closing sell is refused
+        try:
+            st, out = self.tick("2026-10-19 15:55")
+        finally:
+            mock_broker.S.pop("refuse_next_sell", None)
+        self.assertEqual(st["day"]["trades"][0]["status"], "open")
+        self.assertIn("TSLA", mock_broker.S["positions"])
+        st, out = self.tick("2026-10-19 15:56")             # the next pass tries again, and may
+        self.assertEqual(st["day"]["trades"][0]["status"], "flat", out)
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+
+    def test_position_left_over_from_yesterday_is_closed_at_the_open(self):
+        # 2026-11-24: WMT stayed open overnight after a failed flatten; the next day must close it
+        self.autopilot({"target": "1R", "tm_hist_min_avg_R": -0.10, "tm_replays": 2000})
+        self.tick("2026-10-19 10:15")                       # TSLA bought on Monday ...
+        mock_broker.S["orders"].clear()                       # ... its day orders expired at the close
+        post("/mock/price", {"TSLA": 362.00})
+        mock_broker.S["positions"]["KO"] = {"qty": 10.0, "cost": 700.0}   # not the bot's: must stay
+        st, out = self.tick("2026-10-20 09:31")             # Tuesday, the open
+        orphan = next(t for t in st["day"]["trades"] if t.get("orphan"))
+        self.assertEqual((orphan["symbol"], orphan["status"], orphan["exit_price"]), ("TSLA", "flat", 362.0))
+        self.assertEqual(orphan["pnl"], round((362.0 - 364.30) * 8, 2))
+        self.assertNotIn("TSLA", mock_broker.S["positions"])
+        self.assertIn("KO", mock_broker.S["positions"])       # the user's own position is untouched
+        self.assertIn("seit einem früheren Tag noch offen", out)
+        st, out = self.tick("2026-10-20 09:32")             # only once
+        self.assertEqual(len([t for t in st["day"]["trades"] if t.get("orphan")]), 1)
+        mock_broker.S["positions"].pop("KO", None)
+
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")
         cfg = json.load(open(cfgp)); cfg["paper"] = False; json.dump(cfg, open(cfgp, "w"))

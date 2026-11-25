@@ -29,6 +29,15 @@ def _pos_fill(sym, side, qty, price):
         S["positions"].pop(sym, None)
 
 
+OPEN = ("new", "held", "accepted", "pending_new", "pending_cancel", "partially_filled")
+
+
+def _held(sym):
+    """Shares reserved by open exit orders (sells for a long, buys for a short)."""
+    return sum(float(o["qty"]) for o in S["orders"].values()
+               if o["symbol"] == sym and o["status"] in OPEN and (o.get("parent") or o.get("order_class") == "oco"))
+
+
 def _try_fill(o):
     """A market entry fills at once; a limit entry only when the price is at or through its limit."""
     b, sym, side = o["_b"], o["symbol"], o["side"]
@@ -99,7 +108,18 @@ class H(BaseHTTPRequestHandler):
                 s = path.rsplit("/", 1)[1]
                 return self._send(200, self._pos(s)) if s in S["positions"] else self._send(404, {"message": "no position"})
             if path == "/v2/orders":
-                return self._send(200, [_order_view(o) for o in S["orders"].values() if not o.get("parent")])
+                q = parse_qs(urlparse(self.path).query)
+                rows = [o for o in S["orders"].values() if not o.get("parent")]
+                if q.get("status", [""])[0] == "open":
+                    want = set(q.get("symbols", [""])[0].split(",")) - {""}
+                    rows = [o for o in S["orders"].values() if o["status"] in OPEN
+                            and (not want or o["symbol"] in want)]
+                    out = [_order_view(o) for o in rows]
+                    for o in rows:
+                        if o["status"] == "pending_cancel":
+                            o["status"] = "canceled"   # done by the next look
+                    return self._send(200, out)
+                return self._send(200, [_order_view(o) for o in rows])
             if path.startswith("/v2/orders/"):
                 o = S["orders"].get(path.rsplit("/", 1)[1])
                 return self._send(200, _order_view(o)) if o else self._send(404, {"message": "not found"})
@@ -135,7 +155,9 @@ class H(BaseHTTPRequestHandler):
     def _pos(self, s):
         p = S["positions"][s]
         px = S["prices"].get(s, p["cost"] / p["qty"])
-        return {"symbol": s, "qty": str(p["qty"]), "avg_entry_price": str(round(p["cost"] / p["qty"], 4)),
+        avail = p["qty"] - _held(s) if p["qty"] > 0 else p["qty"] + _held(s)
+        return {"symbol": s, "qty": str(p["qty"]), "qty_available": str(avail),
+                "avg_entry_price": str(round(p["cost"] / p["qty"], 4)),
                 "current_price": str(px), "market_value": str(round(px * p["qty"], 2)), "side": "long",
                 "unrealized_pl": str(round(px * p["qty"] - p["cost"], 2)),
                 "unrealized_plpc": str(round((px * p["qty"] - p["cost"]) / p["cost"], 5))}
@@ -146,12 +168,13 @@ class H(BaseHTTPRequestHandler):
         with LOCK:
             if path == "/v2/orders":
                 sym, qty, side = b["symbol"], float(b["qty"]), b["side"]
+                if S.pop("refuse_next_sell", None) and side == "sell":
+                    return self._send(403, {"message": "insufficient qty available for order (test)"})
                 held_now = S["positions"].get(sym, {}).get("qty", 0)
                 short_entry = side == "sell" and b.get("order_class") == "bracket" and held_now <= 0
                 if side == "sell" and held_now < qty and not short_entry:
                     return self._send(403, {"message": "insufficient qty available for order"})
-                held = sum(float(o["qty"]) for o in S["orders"].values() if o["symbol"] == sym and o["side"] == "sell"
-                           and o["type"] == "limit" and o["status"] in ("new", "held"))
+                held = _held(sym) if held_now > 0 else 0
                 if side == "sell" and not short_entry and held + qty > held_now + 1e-9:
                     return self._send(403, {"message": "insufficient qty available for order (held for orders)"})
                 if b.get("order_class") == "oco":
@@ -206,13 +229,25 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         with LOCK:
             o = S["orders"].get(path.rsplit("/", 1)[1])
-            if not o:
+            if not o and path != "/v2/orders":
                 return self._send(404, {"message": "not found"})
+            if path == "/v2/orders":           # cancel ALL open orders
+                for x in S["orders"].values():
+                    if x["status"] in OPEN:
+                        x["status"] = "canceled"
+                return self._send(207, [])
             if o["status"] in ("filled", "canceled"):
                 return self._send(422, {"message": "order is not cancelable"})
-            o["status"] = "canceled"
-            if o.get("parent") or o.get("order_class") == "oco":
-                _cancel_family(o)
+            if S.get("slow_cancel"):
+                o["status"] = "pending_cancel"    # Alpaca: the shares stay held until the cancel is done
+                for x in S["orders"].values():
+                    if x["id"] != o["id"] and x["status"] in OPEN and (
+                            x.get("parent") == (o.get("parent") or o["id"]) or x["id"] == o.get("parent")):
+                        x["status"] = "pending_cancel"
+            else:
+                o["status"] = "canceled"
+                if o.get("parent") or o.get("order_class") == "oco":
+                    _cancel_family(o)
             self.send_response(204)
             self.end_headers()
 

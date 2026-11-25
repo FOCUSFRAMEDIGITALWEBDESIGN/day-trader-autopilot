@@ -205,12 +205,22 @@ class Alpaca:
         return self._req("POST", self.base + "/v2/orders", body, retries=1)
 
     def cancel(self, order_id):
+        """True if the cancel was accepted, False if the order was already done (filled / canceled)."""
         try:
-            return self._req("DELETE", self.base + "/v2/orders/" + order_id, retries=1)
+            self._req("DELETE", self.base + "/v2/orders/" + order_id, retries=1)
+            return True
         except AlpacaError as e:
             if "422" in str(e) or "404" in str(e):
-                return None  # already filled or canceled
+                return False
             raise
+
+    def open_orders(self, symbol=None):
+        """Every open order (and open leg) of a symbol: new, held, accepted, pending cancel ..."""
+        return self.get("/v2/orders", status="open", symbols=symbol, nested="true", limit=500) or []
+
+    def cancel_all(self):
+        """Cancel every open order of the account (last resort before closing out)."""
+        return self._req("DELETE", self.base + "/v2/orders", retries=2)
 
     def wait_fill(self, order_id, seconds=20):
         end = time.time() + seconds

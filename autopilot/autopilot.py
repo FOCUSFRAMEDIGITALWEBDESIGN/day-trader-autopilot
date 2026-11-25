@@ -308,6 +308,8 @@ class Pilot:
                 elif mins < close_m:
                     if not d["premarket_done"]:
                         self.premarket()
+                    if mins >= hm(st["opens"]) + 1:
+                        self.adopt_orphans()
                     self.monitor()
                     flag = os.path.join(AP, "FLATTEN_NOW")
                     if os.path.exists(flag):          # /flat from Telegram: close everything now
@@ -470,7 +472,7 @@ class Pilot:
             held = [{"ticker": p["symbol"], "shares": float(p["qty"]),
                      "lots": [{"id": p["symbol"] + "-1", "date": self.state["date"], "shares": float(p["qty"]),
                                "cost": round(float(p["qty"]) * float(p["avg_entry_price"]), 2)}]}
-                    for p in pos if float(p.get("qty") or 0) > 0]
+                    for p in pos if float(p.get("qty") or 0) != 0]
             cash -= sum(l["lots"][0]["cost"] for l in held)
             wj(pf_path, {"cash": round(cash, 2), "positions": held,
                          "note": "synced from the Alpaca paper account by the autopilot at the start of the day"})
@@ -1068,7 +1070,7 @@ class Pilot:
         return ("; " + ", ".join(bits)) if bits else ""
 
     # ------------------------------------------------------------ the broker step
-    def approve(self, order, index=1):
+    def approve(self, order, index=1, retry_exit=False):
         """Record the autopilot's approval in trader/state/broker.json, in the pack's own format,
         after re-checking that trader-risk passed this exact order today."""
         a = argparse.Namespace(orders=os.path.join(T, "orders.json"), config=os.path.join(T, "config.json"),
@@ -1076,6 +1078,9 @@ class Pilot:
                                state=os.path.join(T, "state", "broker.json"), now=self.fixed_now, today=None)
         orders, cfg, risk, state, today, now = ticketmod._load(a)
         ready, label, rv = ticketmod.status_of(order, risk, state, today)
+        if not ready and retry_exit and label.startswith("DONE: failed") and rv and rv.get("verdict") == "PASS" \
+                and ticketmod.kind_of(order, rv) == "exit":
+            ready = True   # getting OUT must always be possible: a failed exit is tried again after a new check
         if not ready:
             raise RuntimeError("order not ready: " + label)
         if not (self.ap.get("auto_approve_paper") and cfg.get("paper", True)):
@@ -1150,7 +1155,7 @@ class Pilot:
     # ------------------------------------------------------------ while it is open
     def monitor(self):
         for t in self.state.get("trades", []):
-            if t.get("status") not in ("open", "pending"):
+            if t.get("status") not in ("open", "pending") or not t.get("order_id"):
                 continue
             try:
                 o = self.broker.order(t["order_id"])
@@ -1341,67 +1346,140 @@ class Pilot:
 
     # ------------------------------------------------------------ out by the close
     def flatten_all(self):
+        """Close every open trade. Each symbol on its own (one failure never stops the others); a symbol
+        that could not be closed is tried again on the next pass (about every 20 seconds)."""
         mine = {t["symbol"]: t for t in self.state.get("trades", []) if t.get("status") in ("open", "pending")}
-        if not mine:
-            self.state["flattened"] = True
-            return
+        all_done = True
         for sym, t in mine.items():
-            o = self.broker.order(t["order_id"]) or {}
-            if o.get("status") in ("new", "accepted", "pending_new", "partially_filled"):
-                self.broker.cancel(t["order_id"])
-            legs = list(o.get("legs") or [])
-            if t.get("oco_id"):
-                oco = self.broker.order(t["oco_id"]) or {}
-                legs += [oco] + (oco.get("legs") or [])
-            for leg in legs:
-                if leg.get("status") in ("new", "accepted", "held", "pending_new", "partially_filled"):
-                    self.broker.cancel(leg["id"])
-            time.sleep(0 if self.sim else 2)
-            self.monitor()  # a leg may have filled meanwhile
-            if t.get("status") not in ("open", "pending"):
-                continue
-            pos = self.broker.position(sym)
-            qty = float((pos or {}).get("qty") or 0)
-            short = t.get("side", "buy") == "sell"
-            if (qty >= 0) if short else (qty <= 0):
-                t["status"] = "rejected" if not t.get("fill_recorded") else t["status"]
-                continue
-            if short:   # buy to cover: the ticket trader-broker's flatten would build, mirrored
-                cover = {"symbol": sym, "side": "buy", "qty": ticketmod._str_num(abs(qty)), "type": "market",
-                         "time_in_force": "day", "why": "flat by %s New York: covers the %s short before the close"
-                         % (self.cfg.get("flat_by", "15:55"), sym)}
-                wj(os.path.join(T, "orders.json"), shorts.orders_doc(cover, self.now_utc(), note="Cover ticket."))
-                rc = shorts.risk_config(self.cfg, os.path.join(AP, "risk-config-short.json"))
-                code, js, err = self.tool_json("risk", "--config", rc, timeout=60)
-            else:
-                self.tool("ticket", "flatten", "--symbol", sym, "--qty", qty)
-                code, js, err = self.tool_json("risk", timeout=60)
-            order = (rj(os.path.join(T, "orders.json"), {}) or {}).get("orders", [{}])[0]
-            r = ((js or {}).get("results") or [{}])[0]
-            if r.get("verdict") != "PASS":
-                self.event("error", "flatten %s: trader-risk said %s %s" % (sym, r.get("verdict"), r.get("reasons")))
-                continue
-            ticket = self.approve(order)
             try:
-                res = self.broker.submit(ticket, client_order_id="ap-flat-%s-%s" % (self.state["date"], sym))
-            except AlpacaError as e:
-                self.tool("ticket", "result", "--index", 1, "--status", "failed", "--note", str(e)[:200])
-                self.event("error", "flatten %s refused: %s" % (sym, e))
+                if not self.flatten_one(t):
+                    all_done = False
+            except Exception as e:
+                all_done = False
+                self.event("error", "Glattstellen %s fehlgeschlagen: %s (neuer Versuch beim nächsten Durchlauf)"
+                           % (sym, str(e)[:200]))
+        self.state["flattened"] = all_done
+
+    def bot_symbols(self, days=10):
+        """Symbols the autopilot itself traded in the last `days` days (its own positions, nobody else's)."""
+        syms = {t.get("symbol") for t in self.state.get("trades", [])}
+        ddir = os.path.join(AP, "days")
+        if os.path.isdir(ddir):
+            for name in sorted(os.listdir(ddir))[-days:]:
+                for t in (rj(os.path.join(ddir, name), {}) or {}).get("trades", []):
+                    syms.add(t.get("symbol"))
+        for h in (rj(os.path.join(AP, "history.json"), []) or [])[-days:]:
+            for t in h.get("trades", []):
+                syms.add(t.get("symbol"))
+        syms.discard(None)
+        return syms
+
+    def adopt_orphans(self):
+        """A position of the autopilot that is still open from an earlier day (it should have been closed
+        by the flat-by time) is taken over at the open and closed right away. Positions the autopilot never
+        traded are left alone."""
+        d = self.state
+        open_syms = {t["symbol"] for t in d.get("trades", []) if t.get("status") in ("open", "pending")}
+        mine = self.bot_symbols()
+        for p in d.get("positions", []) or []:
+            sym, qty = p.get("symbol"), float(p.get("qty") or 0)
+            if not qty or sym in open_syms or sym not in mine or sym in d.setdefault("orphans_done", []):
                 continue
-            done = self.broker.wait_fill(res["id"], seconds=4 if self.sim else 20) or res
-            fq, fp = done.get("filled_qty"), done.get("filled_avg_price")
-            args = ["result", "--index", 1, "--status", "placed", "--broker-id", res["id"]]
-            if fq and fp and float(fq) > 0:
-                if not short:
-                    args += ["--filled-qty", fq, "--filled-price", fp]
-                self.tool("ticket", *args)
-                if short:
-                    self.record_fill(t, "buy", fq, fp)
-                self.close_trade(t, float(fp), "flat", qty=float(fq))
-            else:
-                self.tool("ticket", *args)
-                t["flat_order_id"] = res["id"]
-        self.state["flattened"] = True
+            side = "buy" if qty > 0 else "sell"
+            t = {"symbol": sym, "side": side, "status": "open", "qty": abs(qty), "orphan": True, "order_id": None,
+                 "at": self.ny().strftime("%H:%M"), "date": d["date"], "fill_price": float(p.get("avg_entry_price") or 0),
+                 "fill_recorded": True, "exit_mode": "fixed", "plan": {}, "legs": {}, "exit_price": None, "pnl": None,
+                 "note": "still open from an earlier day: closed at the open"}
+            d["trades"].append(t)
+            d["orphans_done"].append(sym)
+            self.event("error", "%s: %s %s Stück sind seit einem früheren Tag noch offen (ohne Stop). "
+                       "Werden jetzt zur Eröffnung geschlossen." % (sym, "Long" if qty > 0 else "Short", abs(qty)))
+            try:
+                self.flatten_one(t)
+            except Exception as e:
+                self.event("error", "Schließen von %s fehlgeschlagen: %s (neuer Versuch)" % (sym, str(e)[:160]))
+
+    def clear_orders(self, sym, qty):
+        """Cancel every open order of the symbol and wait until Alpaca really frees the shares
+        (qty_available back to the full position). Last resort: cancel all open orders."""
+        for attempt in range(6):
+            opens = self.broker.open_orders(sym)
+            ids = []
+            for o in opens:
+                ids.append(o["id"])
+                ids += [l["id"] for l in o.get("legs") or [] if l.get("status") not in ("filled", "canceled")]
+            for oid in ids:
+                self.broker.cancel(oid)
+            pos = self.broker.position(sym) or {}
+            avail = abs(float(pos.get("qty_available", pos.get("qty")) or 0))
+            if not opens and avail + 1e-9 >= abs(qty):
+                return True
+            time.sleep(0 if self.sim else 1.5)
+        self.event("warn", "%s: Orders noch nicht storniert, storniere alle offenen Orders" % sym)
+        self.broker.cancel_all()
+        time.sleep(0 if self.sim else 3)
+        pos = self.broker.position(sym) or {}
+        return abs(float(pos.get("qty_available", pos.get("qty")) or 0)) + 1e-9 >= abs(qty)
+
+    def flatten_one(self, t):
+        sym = t["symbol"]
+        short = t.get("side", "buy") == "sell"
+        pos = self.broker.position(sym)
+        qty = float((pos or {}).get("qty") or 0)
+        if (qty >= 0) if short else (qty <= 0):
+            self.monitor()        # a stop or target may have closed it just now
+            if t.get("status") in ("open", "pending"):
+                t["status"] = "rejected" if not t.get("fill_recorded") else "flat"
+                if t["status"] == "flat" and t.get("exit_price") is None:
+                    t["note"] = "position already closed at the broker"
+            return True
+        if not self.clear_orders(sym, qty):
+            self.event("error", "%s: Alpaca hält die Aktien noch für Orders fest, neuer Versuch gleich" % sym)
+            return False
+        self.monitor()            # a leg may have filled while it was being canceled
+        if t.get("status") not in ("open", "pending"):
+            return True
+        pos = self.broker.position(sym)
+        qty = float((pos or {}).get("qty") or 0)
+        if (qty >= 0) if short else (qty <= 0):
+            return True
+        if short:   # buy to cover: the ticket trader-broker's flatten would build, mirrored
+            cover = {"symbol": sym, "side": "buy", "qty": ticketmod._str_num(abs(qty)), "type": "market",
+                     "time_in_force": "day", "why": "flat by %s New York: covers the %s short before the close"
+                     % (self.cfg.get("flat_by", "15:55"), sym)}
+            wj(os.path.join(T, "orders.json"), shorts.orders_doc(cover, self.now_utc(), note="Cover ticket."))
+            rc = shorts.risk_config(self.cfg, os.path.join(AP, "risk-config-short.json"))
+            code, js, err = self.tool_json("risk", "--config", rc, timeout=60)
+        else:
+            self.tool("ticket", "flatten", "--symbol", sym, "--qty", qty)
+            code, js, err = self.tool_json("risk", timeout=60)
+        order = (rj(os.path.join(T, "orders.json"), {}) or {}).get("orders", [{}])[0]
+        r = ((js or {}).get("results") or [{}])[0]
+        if r.get("verdict") != "PASS":
+            self.event("error", "flatten %s: trader-risk said %s %s" % (sym, r.get("verdict"), r.get("reasons")))
+            return False
+        ticket = self.approve(order, retry_exit=True)
+        try:
+            res = self.broker.submit(ticket, client_order_id="ap-flat-%s-%s-%s" % (
+                self.state["date"], sym, self.ny().strftime("%H%M%S")))
+        except AlpacaError as e:
+            self.tool("ticket", "result", "--index", 1, "--status", "failed", "--note", str(e)[:200])
+            self.event("error", "flatten %s refused: %s (neuer Versuch beim nächsten Durchlauf)" % (sym, str(e)[:200]))
+            return False
+        done = self.broker.wait_fill(res["id"], seconds=4 if self.sim else 20) or res
+        fq, fp = done.get("filled_qty"), done.get("filled_avg_price")
+        args = ["result", "--index", 1, "--status", "placed", "--broker-id", res["id"]]
+        if fq and fp and float(fq) > 0:
+            if not short:
+                args += ["--filled-qty", fq, "--filled-price", fp]
+            self.tool("ticket", *args)
+            if short:
+                self.record_fill(t, "buy", fq, fp)
+            self.close_trade(t, float(fp), "flat", qty=float(fq))
+            return True
+        self.tool("ticket", *args)
+        t["flat_order_id"] = res["id"]
+        return False
 
     # ------------------------------------------------------------ dashboard file
     def write_status(self, st, phase):

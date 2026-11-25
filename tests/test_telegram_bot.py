@@ -77,7 +77,7 @@ class TelegramControl(unittest.TestCase):
         t = self.texts()
         self.assertEqual(len(t), 1)
         self.assertIn("Simuliertes Konto: $2.045,50", t[0])
-        self.assertIn("TSLA Long 3 Stk", t[0])
+        self.assertIn("TSLA Long 3 Stk @ 364,30 · Stop 358,32 · Ziel 375,90", t[0])
         self.assertIn("+$5,10", t[0])
 
     def test_pause_resume_and_flat_needs_confirmation(self):
