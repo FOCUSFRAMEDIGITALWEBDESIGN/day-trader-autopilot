@@ -501,6 +501,31 @@ class AutopilotReel(unittest.TestCase):
             tb.AP = old
         self.assertIn("Taktik-Vergleich: 1 Handelstage", text)
 
+    def test_early_close_day_uses_12_55(self):
+        # 2026-11-27, the day after Thanksgiving, closes at 1:00 PM: the Time Machine refused --until 15:55
+        sys.path.insert(0, os.path.join(self.d, "autopilot"))
+        import importlib
+        import autopilot as ap_mod
+        importlib.reload(ap_mod)
+        self.autopilot({})
+        os.environ.update(ALPACA_API_KEY="SIM", ALPACA_SECRET_KEY="SIM")
+        old = os.getcwd()
+        try:
+            os.chdir(self.d)
+            early = ap_mod.Pilot(now="2026-11-27 10:46", sim=True, broker_url="http://127.0.0.1:%d" % PORT)
+            normal = ap_mod.Pilot(now="2026-11-25 10:46", sim=True, broker_url="http://127.0.0.1:%d" % PORT)
+        finally:
+            os.chdir(old)
+        self.assertEqual(early.flat_by_today(), "12:55")
+        self.assertEqual(normal.flat_by_today(), "15:55")
+        # the Time Machine accepts it on that day
+        tm = os.path.join(self.d, "trader-timemachine", "timemachine.py")
+        p = subprocess.run([sys.executable, tm, "run", "--symbol", "TSLA", "--date", "2026-10-19", "--entry", "364.18",
+                            "--stop", "358.32", "--target", "370.04", "--entry-time", "10:15 AM", "--until", "12:55",
+                            "--replays", "200", "--offline", os.path.join(self.d, SIM["tm"]),
+                            "--now", "2026-10-19 10:15", "--json"], capture_output=True, text=True, cwd=self.d)
+        self.assertEqual(p.returncode, 0, p.stderr[-300:])
+
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")
         cfg = json.load(open(cfgp)); cfg["paper"] = False; json.dump(cfg, open(cfgp, "w"))

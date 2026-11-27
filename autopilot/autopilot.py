@@ -277,6 +277,18 @@ class Pilot:
         pnl = sum(t["pnl"] for t in closed if (t.get("date") or "") >= since and t.get("date") != today)
         return round(start + pnl, 2)
 
+    def flat_by_today(self):
+        """The flat-by time that applies TODAY: the configured one (15:55), but never later than 5 minutes
+        before the close, so on a 1:00 PM early close (the day after Thanksgiving, Christmas Eve) it is
+        12:55; on a Fed day with event_flat_by it is that earlier time."""
+        m = hm(self.cfg.get("flat_by", "15:55"))
+        st = clockmod.market_status(self.now_utc())
+        if st.get("closes"):
+            m = min(m, hm(st["closes"]) - 5)
+        if ((self.state.get("event") or {}).get("action")) == "flat_before":
+            m = min(m, hm(self.ap.get("event_flat_by", "13:55")))
+        return "%02d:%02d" % (m // 60, m % 60)
+
     def save(self):
         wj(self.state_path, self.state)
 
@@ -299,9 +311,7 @@ class Pilot:
             self.sync_account()
             if st.get("opens"):
                 close_m = hm(st["closes"])
-                flat_m = min(hm(self.cfg.get("flat_by", "15:55")), close_m - 5)
-                if (d.get("event") or {}).get("action") == "flat_before":
-                    flat_m = min(flat_m, hm(self.ap.get("event_flat_by", "13:55")))
+                flat_m = hm(self.flat_by_today())
                 if mins < hm(st["opens"]):
                     phase = "premarket"
                     if mins >= 9 * 60 and not d["premarket_done"]:
@@ -850,7 +860,7 @@ class Pilot:
         return self.long_budget_risk_place(c, plan)
 
     def step_tm(self, c, plan):
-        code, js, err = self.tool_json("tm", "run", "--write", "--until", self.cfg.get("flat_by", "15:55"),
+        code, js, err = self.tool_json("tm", "run", "--write", "--until", self.flat_by_today(),
                                        "--replays", self.ap["tm_replays"], "--seed", self.ap["tm_seed"], timeout=300)
         if not js or not js.get("mc"):
             self.reject(c, "timemachine", "time machine could not run: %s" % err)
@@ -960,7 +970,7 @@ class Pilot:
             trigger=trig, opening_range={"high": h["or_high"], "low": h["or_low"], "minutes": n * 5})
         # 4. exit plan (mirror of trader-exit) -> trader/plan.json for the Time Machine
         plan, why = shorts.plan_short(sym, self.state["date"], h["price"], h["at"], h["bar_index"], h["or_high"],
-                                      h["or_low"], self.ap["stop"], self.ap["target"], self.cfg.get("flat_by", "15:55"),
+                                      h["or_low"], self.ap["stop"], self.ap["target"], self.flat_by_today(),
                                       n * 5)
         if not plan:
             return self.reject(c, "exit", "short plan refused: " + why)
@@ -1348,7 +1358,7 @@ class Pilot:
                                               "stop_loss": {"stop_price": "%.2f" % be}}, closing_short=side == "sell")
             except AlpacaError as e:
                 self.event("error", "%s: partial exit failed (%s); flatten at %s will close it" % (
-                    t["symbol"], e, self.cfg.get("flat_by", "15:55")))
+                    t["symbol"], e, self.flat_by_today()))
                 t["exit_adjusted"] = "failed"
                 return
             p = float(sold.get("filled_avg_price") or px)
@@ -1488,7 +1498,7 @@ class Pilot:
         if short:   # buy to cover: the ticket trader-broker's flatten would build, mirrored
             cover = {"symbol": sym, "side": "buy", "qty": ticketmod._str_num(abs(qty)), "type": "market",
                      "time_in_force": "day", "why": "flat by %s New York: covers the %s short before the close"
-                     % (self.cfg.get("flat_by", "15:55"), sym)}
+                     % (self.flat_by_today(), sym)}
             wj(os.path.join(T, "orders.json"), shorts.orders_doc(cover, self.now_utc(), note="Cover ticket."))
             rc = shorts.risk_config(self.cfg, os.path.join(AP, "risk-config-short.json"))
             code, js, err = self.tool_json("risk", "--config", rc, timeout=60)
