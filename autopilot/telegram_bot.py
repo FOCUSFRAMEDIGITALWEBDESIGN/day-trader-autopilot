@@ -37,7 +37,8 @@ import notify  # noqa: E402
 COMMANDS = [("status", "Lage jetzt: Konto, Tages-P&L, offene Positionen"),
             ("positionen", "Offene Positionen mit Stop und Ziel"),
             ("trades", "Trades von heute"), ("kandidaten", "Letzte Setups und Gründe"),
-            ("statistik", "Alle Paper-Trades ausgewertet"), ("lernen", "Letzter Lernlauf"),
+            ("statistik", "Alle Paper-Trades ausgewertet"), ("vergleich", "Alle Taktiken im Vergleich"),
+            ("lernen", "Letzter Lernlauf"),
             ("pause", "Keine neuen Einstiege"), ("weiter", "Einstiege wieder erlauben"),
             ("flat", "Alles sofort glattstellen"), ("export", "Wochen-Datei schicken"),
             ("link", "Dashboard-Adresse"), ("konto", "Kontogröße ändern, z. B. /konto 2500"),
@@ -72,10 +73,14 @@ class Telegram:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode() or "{}")
 
+    KEYBOARD = json.dumps({"keyboard": [["/status", "/positionen"], ["/trades", "/vergleich"],
+                                        ["/statistik", "/kandidaten"], ["/pause", "/weiter"], ["/export", "/hilfe"]],
+                           "resize_keyboard": True, "is_persistent": True})
+
     def send(self, text):
         for i in range(0, len(text), 3900):
             self.call("sendMessage", {"chat_id": self.chat, "text": text[i:i + 3900],
-                                      "disable_web_page_preview": "true"}, timeout=20)
+                                      "disable_web_page_preview": "true", "reply_markup": self.KEYBOARD}, timeout=20)
 
     def send_document(self, filename, data, caption=""):
         b = uuid.uuid4().hex
@@ -205,6 +210,30 @@ def stats_text():
     return "\n".join(out)
 
 
+def compare_text():
+    import tactics
+    doc = rj(os.path.join(AP, "shadow.json"), {}) or {}
+    days = doc.get("days") or {}
+    if not days:
+        return "Noch kein Taktik-Vergleich. Er läuft jeden Handelstag nach US-Börsenschluss (ca. 22:20 Uhr)."
+    allres = {}
+    for day in days.values():
+        for name, trades in day.items():
+            allres.setdefault(name, []).extend(trades)
+    rows = tactics.leaderboard(allres)
+    out = ["🏁 Taktik-Vergleich: %d Handelstage, gleiche Kurse, ohne Orders" % len(days),
+           "($ bei 1 %% Risiko = $20 pro R)"]
+    for i, r in enumerate(rows, 1):
+        if not r.get("n"):
+            out.append("%d. %s: noch kein Signal" % (i, r["name"]))
+            continue
+        out.append("%d. %s: %d Trades · %s %% Treffer · Ø %+.2f R · Σ %+.1f R (%s)" % (
+            i, r["name"], r["n"], r["win_pct"], r["avg_R"], r["sum_R"], usd(r["usd"], True)))
+    if len(days) < 20:
+        out.append("\nNoch wenige Tage: erst ab etwa 20 Handelstagen sagt die Reihenfolge etwas aus.")
+    return "\n".join(out)
+
+
 def learning_text():
     L = rj(os.path.join(AP, "learning.json"), []) or []
     if not L:
@@ -247,6 +276,8 @@ class Bot:
             return stats_text()
         if cmd == "lernen":
             return learning_text()
+        if cmd == "vergleich":
+            return compare_text()
         if cmd == "link":
             return link_text()
         if cmd == "pause":

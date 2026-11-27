@@ -6,6 +6,7 @@ import json, os, shutil, subprocess, sys, tempfile, unittest, urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "autopilot"))
 import mock_broker  # noqa: E402
+import tactics  # noqa: E402
 
 import socket
 _s = socket.socket(); _s.bind(("127.0.0.1", 0)); PORT = _s.getsockname()[1]; _s.close()
@@ -471,6 +472,34 @@ class AutopilotReel(unittest.TestCase):
         st, out = self.tick("2026-10-20 09:32")             # only once
         self.assertEqual(len([t for t in st["day"]["trades"] if t.get("orphan")]), 1)
         mock_broker.S["positions"].pop("KO", None)
+
+    def test_daily_tactic_comparison_after_the_close(self):
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        from test_alpaca_data import yahoo_to_alpaca_bars
+        fx_dir = os.path.join(ROOT, "tests", "fixtures")
+        mock_broker.S["daily"] = {
+            "TSLA": yahoo_to_alpaca_bars(os.path.join(fx_dir, "trader-timemachine", "TSLA-60d5m.json.gz")),
+            "SPY": yahoo_to_alpaca_bars(os.path.join(fx_dir, "autopilot", "SPY-60d5m.json.gz"))}
+        try:
+            self.autopilot({"target": "1R", "sim_shadow": True})
+            self.tick("2026-10-16 15:00")                    # a full session in the fixture
+            st, out = self.tick("2026-10-16 16:25")          # 25 minutes after the close
+        finally:
+            mock_broker.S.pop("daily", None)
+        self.assertIn("Taktik-Vergleich 2026-10-16", out)
+        doc = json.load(open(os.path.join(self.d, "trader", "autopilot", "shadow.json")))
+        day = doc["days"]["2026-10-16"]
+        self.assertEqual(set(day), {t["name"] for t in tactics.TACTICS})
+        self.assertTrue(all(t["date"] == "2026-10-16" for v in day.values() for t in v))
+        # the Telegram leaderboard reads the same file
+        import telegram_bot as tb
+        old = tb.AP
+        tb.AP = os.path.join(self.d, "trader", "autopilot")
+        try:
+            text = tb.compare_text()
+        finally:
+            tb.AP = old
+        self.assertIn("Taktik-Vergleich: 1 Handelstage", text)
 
     def test_refuses_live(self):
         cfgp = os.path.join(self.d, "trader", "config.json")

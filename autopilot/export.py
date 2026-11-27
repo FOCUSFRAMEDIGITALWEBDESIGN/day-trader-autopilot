@@ -19,7 +19,7 @@ PRIVATE_KEYS = {"sec_user_agent"}
 FILES = [
     ("trader/autopilot/history.json", None), ("trader/autopilot/state.json", None),
     ("trader/autopilot/status.json", None), ("trader/autopilot/events.jsonl", None),
-    ("trader/autopilot/equity.jsonl", None), ("trader/autopilot/learning.json", None),
+    ("trader/autopilot/equity.jsonl", None), ("trader/autopilot/learning.json", None), ("trader/autopilot/shadow.json", None),
     ("trader/autopilot.json", "settings"), ("trader/config.json", "settings"),
     ("trader/portfolio.json", None), ("trader/state/broker.json", None), ("trader/state/risk.json", None),
 ]

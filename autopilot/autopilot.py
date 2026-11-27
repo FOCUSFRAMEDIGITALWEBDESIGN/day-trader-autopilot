@@ -59,6 +59,7 @@ import inplay  # noqa: E402
 import notify  # noqa: E402
 import events  # noqa: E402
 import tunnels  # noqa: E402
+import tactics  # noqa: E402
 scanmod = _mod("ap_scan", TOOLS["scan"])
 ticketmod = _mod("ap_ticket", TOOLS["ticket"])
 
@@ -328,7 +329,13 @@ class Pilot:
                 else:
                     phase = "after close"
                     self.monitor()
-                    if not d.get("summary_sent"):
+                    if not d.get("shadow_done") and mins >= close_m + 20 and (not self.sim or self.ap.get("sim_shadow")):
+                        d["shadow_done"] = True
+                        try:
+                            self.shadow_day()
+                        except Exception as e:
+                            self.event("warn", "Taktik-Vergleich heute nicht möglich: %s" % str(e)[:160])
+                    if not d.get("summary_sent") and (d.get("shadow_done") or self.sim):
                         d["summary_sent"] = True
                         self.daily_summary()
         except Exception as e:  # keep the daemon alive; report it
@@ -344,6 +351,35 @@ class Pilot:
             self.event("error", "learner could not start: %s" % e)
         self.write_status(st, phase)
         self.save()
+
+    def shadow_day(self):
+        """After the close: every tactic in tactics.py on today's real 5-minute candles of today's scan
+        list (no orders, the same data for all), stored in trader/autopilot/shadow.json."""
+        d = self.state
+        syms = list(dict.fromkeys((d.get("symbols") or []) + ["SPY"]))
+        start = (datetime.datetime.strptime(d["date"], "%Y-%m-%d") - datetime.timedelta(days=28)).strftime("%Y-%m-%dT00:00:00Z")
+        end = (datetime.datetime.strptime(d["date"], "%Y-%m-%d") + datetime.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+        bars = {}
+        for i in range(0, len(syms), 100):
+            batch = syms[i:i + 100]
+            try:
+                got = self.broker.multi_bars(batch, "5Min", start, end, feed="sip")
+            except AlpacaError:
+                got = self.broker.multi_bars(batch, "5Min", start, end, feed="iex")
+            bars.update(got)
+        data = {s: tactics.sessions_from_alpaca(b) for s, b in bars.items()}
+        data = {s: S for s, S in data.items() if S}
+        res = tactics.run(data, dates=[d["date"]], sides=("buy", "sell") if self.ap.get("sides", "both") == "both"
+                          else (("buy",) if self.ap.get("sides") == "long" else ("sell",)))
+        path = os.path.join(AP, "shadow.json")
+        doc = rj(path, {}) or {}
+        doc.setdefault("days", {})[d["date"]] = {k: v for k, v in res.items()}
+        doc["symbols"] = len(data)
+        wj(path, doc)
+        today = tactics.leaderboard(res)
+        self.event("info", "Taktik-Vergleich %s: %s" % (d["date"], ", ".join(
+            "%s %+.1fR (%d)" % (r["name"], r["sum_R"], r["n"]) for r in today if r.get("n"))[:400] or "keine Signale"))
+        d["shadow_today"] = [{k: r.get(k) for k in ("name", "n", "sum_R")} for r in today]
 
     def daily_summary(self):
         d = self.state
@@ -361,6 +397,12 @@ class Pilot:
             lines.append("Heute keine Trades. Kandidaten geprüft: %d." % len(d.get("candidates", {})))
         if acct.get("equity"):
             lines.append("Paper-Konto: $%s" % acct["equity"])
+        sh = [r for r in (d.get("shadow_today") or []) if r.get("n")]
+        if sh:
+            lines.append("\n🏁 Taktiken heute (ohne Orders, gleiche Kurse):")
+            for r in sh[:8]:
+                lines.append("  %s: %d Trades, %+.1f R" % (r["name"], r["n"], r["sum_R"]))
+            lines.append("Gesamtstand: /vergleich")
         notify.send("\n".join(lines))
 
     # ------------------------------------------------------------ weekly learning

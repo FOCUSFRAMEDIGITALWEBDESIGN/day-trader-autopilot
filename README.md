@@ -88,6 +88,14 @@ python3 tuning/gate_eval.py    # Time Machine als Filter, walk-forward ohne Blic
 
 Ergebnisse und die gewählte Einstellung: siehe `tuning/TUNING.md`.
 
+## Taktik-Vergleich
+
+`autopilot/tactics.py` enthält 8 Taktiken: ORB 15 2R (live), ORB 15 Trailing, ORB 15 Schlusskurs-Stop,
+ORB 15 + Stärke, ORB 30 2R, ORB 5 In-Play, VWAP-Rücksetzer, Gap-Fade, jeweils Long und Short.
+Jeden Handelstag nach US-Börsenschluss spielt der Bot alle auf den echten 5-Minuten-Kerzen seiner Scanliste
+durch (ohne Orders, gleiche Daten für alle) und speichert das in `trader/autopilot/shadow.json`.
+Rangliste in Telegram: `/vergleich`. Rückblick auf vorhandene Daten: `python tuning/compare.py`.
+
 ## Steuerung über Telegram
 
 Mit eingerichtetem Telegram (`telegram-setup.bat` auf dem PC, auf dem Server

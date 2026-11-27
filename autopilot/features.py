@@ -88,7 +88,8 @@ def trail_level(mode, fill, stop, risk, high, atr_value=None, k=2.0):
             st = max(st, fill + (n - 1) * risk)
     elif mode == "trail_atr" and atr_value:
         st = max(st, high - k * atr_value)
-    return int(st * 100 + 1e-6) / 100.0
+    import math
+    return math.floor(round(st * 100, 4)) / 100.0      # away from the trade, shorts (negative) too
 
 
 def simulate_exit(bars, fill, stop, target, risk, mode, at_R=1.0, atr_value=None, k=2.0):
